@@ -39,6 +39,34 @@ echo "✅ 빌드 완료: mac/$APP ($VERSION)"
 mkdir -p build/dmg
 cp -R "$APP" build/dmg/
 ln -s /Applications build/dmg/Applications
+# 공증 없는 무료 앱이라 첫 실행 경고를 없애는 명령을 안내 파일로 같이 넣는다 (TextEdit가 한글을 바로 읽도록 UTF-8 BOM)
+printf '\xEF\xBB\xBF' > "build/dmg/설치 방법 - How to install.txt"
+cat >> "build/dmg/설치 방법 - How to install.txt" <<'TXT'
+Kasino 설치 방법
+
+1. Kasino를 옆의 Applications(응용 프로그램) 폴더로 끌어다 놓으세요.
+
+2. 터미널을 열고(Spotlight에서 "터미널" 검색) 아래 한 줄을 복사해 붙여넣은 뒤 Enter를 누르세요.
+
+   xattr -dr com.apple.quarantine /Applications/Kasino.app
+
+3. 응용 프로그램 폴더에서 Kasino를 열면 메뉴바에 스페이드 표시가 생깁니다.
+
+2번은 애플 공증을 받지 않은 무료 앱이라 처음 한 번만 필요합니다. 이 과정을 건너뛰면 "Kasino를 열 수 없습니다" 창이 뜹니다.
+
+
+How to install Kasino
+
+1. Drag Kasino onto the Applications folder next to it.
+
+2. Open Terminal (search "Terminal" in Spotlight), paste this line and press Enter:
+
+   xattr -dr com.apple.quarantine /Applications/Kasino.app
+
+3. Open Kasino from Applications. A spade icon appears in the menu bar.
+
+Step 2 is only needed once. Kasino is a free app without Apple notarization, and skipping this step shows a "Kasino Not Opened" warning.
+TXT
 hdiutil create -volname "Kasino" -srcfolder build/dmg -ov -format UDZO "build/Kasino-$VERSION.dmg" >/dev/null
 rm -rf build/dmg
 echo "✅ DMG: mac/build/Kasino-$VERSION.dmg"

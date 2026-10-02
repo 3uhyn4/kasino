@@ -24,7 +24,13 @@ It's for practice only. There's no real money involved, nothing to buy, and noth
 
 Grab the latest version from [Releases](../../releases/latest).
 
-**Mac** (macOS 13 or later): open `Kasino-x.y.z.dmg` and drag Kasino into Applications. The app isn't notarized by Apple, so the first time you open it macOS will block it. Go to System Settings > Privacy & Security, scroll down and click Open Anyway. After that it lives in your menu bar.
+**Mac** (macOS 13 or later): open `Kasino-x.y.z.dmg` and drag Kasino into Applications. Kasino isn't notarized by Apple, so before opening it the first time, paste this into Terminal once:
+
+```
+xattr -dr com.apple.quarantine /Applications/Kasino.app
+```
+
+The same instructions are in the DMG. After that, Kasino lives in your menu bar.
 
 **Windows** (10 or 11): run `Kasino-Setup-x.y.z.exe` to install, or `Kasino-x.y.z-portable.exe` to run it without installing. If SmartScreen shows up, click More info > Run anyway. Kasino sits in the system tray next to the clock. Click to open, right-click to quit.
 
