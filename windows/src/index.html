@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'">
+  <title>Kasino</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div>
+      <small id="bankroll-label" class="muted"></small>
+      <div id="bankroll" class="bankroll mono"></div>
+    </div>
+    <div class="right">
+      <small id="session-label" class="muted"></small>
+      <div id="session" class="mono"></div>
+    </div>
+  </header>
+  <nav id="tabs" class="seg tabs"></nav>
+  <main id="view"></main>
+  <footer id="toast"></footer>
+  <script src="core.js"></script>
+  <script src="engine.js"></script>
+  <script src="views.js"></script>
+</body>
+</html>

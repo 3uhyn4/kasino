@@ -1,0 +1,5 @@
+node_modules/
+windows/dist/
+mac/build/
+.DS_Store
+release/
