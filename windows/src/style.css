@@ -238,3 +238,4 @@ table.stats .l { text-align: left; }
 .lrow.me { background: rgba(37, 99, 235, 0.15); }
 .lrow .rk { width: 26px; text-align: right; font-size: 12px; }
 .lrow .nm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+.aibadge { font-size: 9px; font-weight: 700; color: var(--muted); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; }

@@ -35,6 +35,7 @@ create table public.players (
   rounds         int not null default 0,
   last_round_at  timestamptz,
   relief_day     date,
+  is_bot         boolean not null default false,   -- AI 플레이어 (server/ai-players.sql)
   failed_logins  int not null default 0,
   locked_until   timestamptz,
   created_at     timestamptz not null default now()
@@ -259,7 +260,11 @@ language sql stable security definer set search_path = ''
 as $$
   select coalesce(json_agg(x order by x.rank, x.rounds desc), '[]'::json)
   from (
-    select nickname, balance, rounds,
+    -- AI는 bot: true, 이름은 name. 배지를 모르는 옛 버전 앱을 위해 nickname 뒤에 " (AI)"
+    select case when is_bot then nickname || ' (AI)' else nickname end as nickname,
+           nickname as name,
+           is_bot as bot,
+           balance, rounds,
            rank() over (order by balance desc) as rank
     from public.players
     order by balance desc, rounds desc

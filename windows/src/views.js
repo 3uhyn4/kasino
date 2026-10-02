@@ -624,7 +624,8 @@ function rankBoardView() {
     const me = p && r.nickname === p.nickname;
     return h('div', { class: 'lrow' + (me ? ' me' : '') },
       h('span', { class: 'mono b rk' }, r.rank),
-      h('span', { class: 'nm' + (me ? ' b' : '') }, r.nickname),
+      h('span', { class: 'nm' + (me ? ' b' : '') }, r.bot ? (r.name || r.nickname) : r.nickname),
+      r.bot ? h('span', { class: 'aibadge' }, 'AI') : null,
       h('span', { class: 'spacer' }),
       h('span', { class: 'mono b' }, fmt(Number(r.balance))));
   });

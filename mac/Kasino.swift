@@ -2206,6 +2206,8 @@ struct OnlineProfile: Codable, Equatable {
 
 struct LeaderRow: Codable, Identifiable {
     let nickname: String
+    let name: String?     // AI는 " (AI)"가 붙지 않은 이름
+    let bot: Bool?
     let balance: Double
     let rounds: Int
     let rank: Int
@@ -2506,7 +2508,13 @@ struct RankBoardView: View {
                             let me = row.nickname == online.profile?.nickname
                             HStack(spacing: 8) {
                                 Text("\(row.rank)").font(.caption.bold().monospacedDigit()).frame(width: 26, alignment: .trailing)
-                                Text(row.nickname).font(.callout.weight(me ? .bold : .regular)).lineLimit(1)
+                                Text(row.bot == true ? (row.name ?? row.nickname) : row.nickname)
+                                    .font(.callout.weight(me ? .bold : .regular)).lineLimit(1)
+                                if row.bot == true {
+                                    Text("AI").font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
+                                        .padding(.horizontal, 4).padding(.vertical, 1)
+                                        .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color.secondary.opacity(0.6)))
+                                }
                                 Spacer()
                                 Text(fmt(row.balance)).font(.callout.weight(.semibold).monospacedDigit())
                             }
