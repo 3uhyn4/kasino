@@ -330,7 +330,9 @@ function holdemView() {
   };
 
   let controls;
-  if (!hd.inHand) {
+  if (!hd.inHand && hd.ranked) {
+    controls = [h('button', { class: 'btn green full', onclick: () => hd.startHand() }, T('다음 핸드', 'Next hand', '次のハンド'))];
+  } else if (!hd.inHand) {
     controls = [
       betControl(false, T('빅블라인드', 'Big blind', 'BB')),
       h('button', { class: 'btn green full', onclick: () => hd.startHand() }, `${T('딜', 'Deal', 'ディール')} · BB ${fmt(effectiveBet())}`),
@@ -340,16 +342,23 @@ function holdemView() {
       h('button', { class: 'btn red grow', onclick: () => hd.fold() }, T('폴드', 'Fold', 'フォールド')),
       h('button', { class: 'btn blue grow', onclick: () => hd.call() },
         hd.toCall === 0 ? T('체크', 'Check', 'チェック')
-          : S.bankroll <= hd.toCall ? `${T('올인', 'All-in', 'オールイン')} ${fmt(S.bankroll)}` : `${T('콜', 'Call', 'コール')} ${fmt(hd.toCall)}`),
-      h('button', { class: 'btn orange grow', disabled: !hd.canRaise || S.bankroll < hd.toCall + hd.betSize, onclick: () => hd.raiseHuman() },
+          : hd.available <= hd.toCall ? `${T('올인', 'All-in', 'オールイン')} ${fmt(hd.available)}` : `${T('콜', 'Call', 'コール')} ${fmt(hd.toCall)}`),
+      h('button', { class: 'btn orange grow', disabled: !hd.canRaise || hd.available < hd.toCall + hd.betSize, onclick: () => hd.raiseHuman() },
         hd.currentBet === 0 ? `${T('벳', 'Bet', 'ベット')} ${fmt(hd.betSize)}` : `${T('레이즈', 'Raise', 'レイズ')} ${fmt(hd.currentBet + hd.betSize)}`),
-      h('button', { class: 'btn purple grow', disabled: S.bankroll <= 0, onclick: () => hd.shove() }, T('올인', 'All-in', 'オールイン')))];
+      h('button', { class: 'btn purple grow', disabled: hd.available <= 0, onclick: () => hd.shove() }, T('올인', 'All-in', 'オールイン')))];
   } else {
     controls = [h('div', { class: 'row gap6 center waiting' }, h('span', { class: 'spinner' }), h('small', { class: 'muted' }, T('상대 차례...', 'Opponents acting...', '相手の番...')))];
   }
 
   let coach = null;
-  if (prefs.coach) {
+  if (hd.ranked && hd.match) {
+    const m = hd.match;
+    coach = h('div', { class: 'coach row gap6 center' },
+      h('small', { class: 'b' }, `${T('랭크전', 'Ranked', 'ランク戦')} · ${T('핸드', 'Hand', 'ハンド')} ${Math.min(m.hand + 1, RANK.hands)}/${RANK.hands}`),
+      h('span', { class: 'spacer' }),
+      h('small', { class: 'mono b' }, `${T('칩', 'Chips', 'チップ')} ${fmt(m.stack / RANK.bb)} BB`),
+      h('small', { class: 'mono ' + (m.net > 0 ? 'pos' : m.net < 0 ? 'neg' : 'muted') }, `(${m.net >= 0 ? '+' : '−'}${fmt(Math.abs(m.net) / RANK.bb)})`));
+  } else if (prefs.coach && !hd.ranked) {
     if (hd.humanTurn && hd.coachEquity !== null) {
       const [txt, color] = hd.advice();
       coach = h('div', { class: 'coach row gap10 center' },
@@ -363,7 +372,14 @@ function holdemView() {
     }
   }
 
+  const modeSwitch = h('div', { class: 'seg mode' + (hd.inHand || hd.matchActive ? ' locked' : '') },
+    [[false, T('연습', 'Practice', '練習')], [true, T('랭크', 'Ranked', 'ランク')]].map(([v, label]) =>
+      h('button', { class: hd.ranked === v ? 'on' : '', disabled: hd.inHand || hd.matchActive, onclick: () => { hd.ranked = v; render(); } }, label)));
+
+  if (hd.ranked && !hd.matchActive && !hd.inHand) return h('div', { class: 'stack' }, modeSwitch, rankLobby());
+
   return h('div', { class: 'stack' },
+    modeSwitch,
     h('div', { class: 'row gap6' }, [1, 2, 3].map(ai)),
     h('div', { class: 'panel felt' },
       h('div', { class: 'row gap4 center' }, [0, 1, 2, 3, 4].map(i => (i < hd.board.length ? cardEl(hd.board[i], true) : h('div', { class: 'card small slot' })))),
@@ -377,6 +393,36 @@ function holdemView() {
     coach,
     resultText(hd.message || hd.intro(), hd.win),
     ...controls);
+}
+
+/** 랭크 모드 대기 화면: 티어, 레이팅, 직전 결과, 시작 버튼 */
+function rankLobby() {
+  const r = S.rank;
+  const t = tierInfo(r.rating);
+  const stat = (label, value) => h('div', { class: 'panel tile' }, h('small', { class: 'muted' }, label), h('div', { class: 'b mono' }, value));
+  const res = holdem.match && holdem.match.result;
+  return h('div', { class: 'stack lobby' },
+    h('div', { class: 'panel row gap14 center rankcard' },
+      h('div', { class: 'badge', style: { color: t.color, borderColor: t.color, background: t.color + '2e' } }, tierNames()[t.index][0]),
+      h('div', { class: 'grow1' },
+        h('div', { class: 'tier', style: { color: t.color } }, t.label),
+        h('div', { class: 'rating mono' }, fmt(r.rating)),
+        t.next === null ? null : h('div', { class: 'bar' }, h('i', { style: { width: (t.progress * 100) + '%', background: t.color } })),
+        t.next === null ? null : h('small', { class: 'muted' }, T(`다음 단계까지 ${Math.max(0, t.next - r.rating)}점`, `${Math.max(0, t.next - r.rating)} pts to next`, `次まで${Math.max(0, t.next - r.rating)}点`)))),
+    h('div', { class: 'row gap8' },
+      stat(T('랭크전', 'Matches', '試合数'), r.matches),
+      stat(T('최고', 'Peak', '最高'), r.peak),
+      stat(T('최근', 'Recent', '最近'), r.recent.length ? r.recent.slice(-5).map(d => (d >= 0 ? '+' : '') + d).join(' ') : '—')),
+    res ? h('div', { class: 'coach lastres' },
+      h('small', { class: 'muted b' }, T('지난 판 결과', 'Last match', '前回の結果')),
+      h('div', { class: 'delta mono ' + (res.delta > 0 ? 'pos' : res.delta < 0 ? 'neg' : 'muted') }, (res.delta >= 0 ? '+' : '') + res.delta),
+      h('small', { class: 'mono' }, `${T('칩', 'Chips', 'チップ')} ${res.netBB >= 0 ? '+' : '−'}${fmt(Math.abs(res.netBB))} BB · ${T('판단 정확도', 'Accuracy', '判断精度')} ${res.accuracy === null ? '—' : pct(res.accuracy)}`),
+      res.placement ? h('small', { class: 'muted' }, T('배치고사 (변동 2배)', 'Placement match (double change)', '配置戦（変動2倍）')) : null) : null,
+    h('button', { class: 'btn green full', onclick: () => holdem.startMatch() }, T('랭크전 시작 · 20핸드', 'Start ranked match · 20 hands', 'ランク戦開始 · 20ハンド')),
+    h('div', { class: 'caption' }, T(
+      '100BB로 20핸드를 칩니다. 칩 손익과 판단 정확도로 점수가 바뀌고, 코치는 꺼져요. 뱅크롤에는 영향이 없어요. 티어가 오를수록 AI가 정확해집니다.',
+      'You play 20 hands with 100 BB. Your rating moves with chips won and decision accuracy. No coach, and your bankroll isn\'t touched. AI opponents get sharper as you climb.',
+      '100BBで20ハンドをプレイします。チップ損益と判断の正確さでレートが変動し、コーチはオフ。残高には影響しません。ティアが上がるほどAIが正確になります。')));
 }
 
 // ================= 슬롯 =================
@@ -502,6 +548,7 @@ function statsView() {
       }))),
     h('div', {},
       h('small', { class: 'muted b' }, T('실력', 'Skill', '実力')),
+      row(T('홀덤 랭크', "Hold'em rank", 'ホールデムランク'), S.rank.matches === 0 ? '—' : `${tierInfo(S.rank.rating).label} · ${fmt(S.rank.rating)} (${T('최고', 'peak', '最高')} ${fmt(S.rank.peak)})`),
       row(T('홀덤 판단 정확도', "Hold'em decision accuracy", 'ホールデム判断の正確さ'), acc === null ? '—' : `${pct(acc)} (${hs.goodDecisions}/${hs.decisions})`),
       row(T('최장 연승 / 연패', 'Longest win / loss streak', '最長連勝 / 連敗'), `${all.bestStreak} / ${-all.worstStreak}`),
       row(T('총 베팅액 / ROI', 'Total wagered / ROI', '総ベット額 / ROI'), `${fmt(all.wagered)} / ${roi(all) === null ? '—' : pct(roi(all))}`)),

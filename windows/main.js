@@ -15,7 +15,7 @@ if (!app.requestSingleInstanceLock()) process.exit(0);
 function createWindow() {
   win = new BrowserWindow({
     width: 448,
-    height: 560,
+    height: 590,
     show: false,
     frame: false,
     resizable: false,

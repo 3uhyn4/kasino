@@ -95,7 +95,8 @@ const accuracy = s => (s.decisions > 0 ? s.goodDecisions / s.decisions : null);
 
 const SAVE_KEY = 'kasino-v1';
 const S = Object.assign(
-  { bankroll: 1e6, startBankroll: 1e6, stats: {}, curve: [1e6], bacHistory: [], dtHistory: [] },
+  { bankroll: 1e6, startBankroll: 1e6, stats: {}, curve: [1e6], bacHistory: [], dtHistory: [],
+    rank: { rating: 1000, matches: 0, peak: 1000, recent: [] } },
   safeParse(localStorage.getItem(SAVE_KEY))
 );
 function save() { localStorage.setItem(SAVE_KEY, JSON.stringify(S)); }
@@ -148,6 +149,41 @@ function settle(game, b, payout, expectedLoss) {
   if (S.curve.length > 500) S.curve.splice(0, S.curve.length - 500);
   save();
   return net;
+}
+
+// ---------- 랭크 (홀덤)
+
+const TIER_FLOORS = [0, 800, 1000, 1200, 1400, 1600, 1800, 2000];
+const TIER_COLORS = ['#737379', '#9e663d', '#8c99a8', '#d9a31a', '#299e94', '#407af2', '#944ddb', '#db3342'];
+function tierNames() {
+  return [T('아이언', 'Iron', 'アイアン'), T('브론즈', 'Bronze', 'ブロンズ'), T('실버', 'Silver', 'シルバー'),
+          T('골드', 'Gold', 'ゴールド'), T('플래티넘', 'Platinum', 'プラチナ'), T('다이아', 'Diamond', 'ダイヤ'),
+          T('마스터', 'Master', 'マスター'), T('그랜드마스터', 'Grandmaster', 'グランドマスター')];
+}
+/** 아이언~다이아는 IV~I 네 단계(각 50점), 마스터·그랜드마스터는 단계 없음 */
+function tierInfo(r) {
+  let idx = 0;
+  TIER_FLOORS.forEach((f, i) => { if (f <= r) idx = i; });
+  const name = tierNames()[idx];
+  if (idx <= 5) {
+    const lo = idx === 0 ? 600 : TIER_FLOORS[idx];
+    const span = (TIER_FLOORS[idx + 1] - lo) / 4;
+    const d = r < lo ? 0 : Math.min(3, Math.floor((r - lo) / span));
+    const divLo = lo + d * span;
+    return { index: idx, label: `${name} ${['IV', 'III', 'II', 'I'][d]}`, color: TIER_COLORS[idx],
+             progress: r < lo ? 0 : Math.min(1, (r - divLo) / span), next: divLo + span };
+  }
+  if (idx === 6) return { index: 6, label: name, color: TIER_COLORS[6], progress: Math.min(1, (r - 1800) / 200), next: 2000 };
+  return { index: 7, label: name, color: TIER_COLORS[7], progress: 1, next: null };
+}
+function applyRank(newRating, delta) {
+  const r = S.rank;
+  r.rating = newRating;
+  r.matches++;
+  r.peak = Math.max(r.peak, newRating);
+  r.recent.push(delta);
+  if (r.recent.length > 10) r.recent.splice(0, r.recent.length - 10);
+  save();
 }
 
 function recordDecision(good) {

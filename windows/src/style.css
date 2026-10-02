@@ -69,7 +69,7 @@ header { display: flex; justify-content: space-between; align-items: flex-end; -
 header .right { text-align: right; }
 .bankroll { font-size: 22px; font-weight: 600; }
 #session { font-weight: 500; font-size: 14px; }
-#view { height: 400px; }
+#view { height: 430px; }
 #toast { text-align: center; color: var(--orange); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* 레이아웃 */
@@ -209,3 +209,17 @@ table.stats .l { text-align: left; }
 .section { display: flex; flex-direction: column; gap: 6px; }
 .section .seg { max-width: 300px; }
 .check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+
+/* 랭크 */
+.seg.mode { align-self: center; width: 180px; }
+.seg button:disabled { opacity: 0.5; cursor: default; }
+.rankcard { padding: 12px; }
+.badge { width: 72px; height: 72px; border-radius: 50%; border: 3px solid; display: flex; align-items: center; justify-content: center;
+         font-size: 30px; font-weight: 900; flex: none; }
+.grow1 { flex: 1; }
+.tier { font-size: 20px; font-weight: 700; }
+.rating { font-size: 17px; font-weight: 600; margin: 2px 0 6px; }
+.bar { height: 5px; border-radius: 3px; background: var(--btn); overflow: hidden; margin-bottom: 4px; }
+.bar i { display: block; height: 100%; }
+.lastres { height: auto; padding: 8px; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.delta { font-size: 24px; font-weight: 700; }

@@ -242,6 +242,8 @@ function equity(hole, board, opponents, iters = 200) {
 
 // ================= 홀덤 (리밋, AI 3명) =================
 
+const RANK = { bb: 1000, hands: 20, startStack: 100 * 1000 };
+
 class Holdem {
   constructor(onChange) {
     this.onChange = onChange;
@@ -268,7 +270,14 @@ class Holdem {
     this.humanSettled = false;
     this.coachEquity = null;
     this.feedback = '';
+    // 랭크 모드: 뱅크롤과 별개인 고정 칩으로 20핸드를 치고 레이팅을 매긴다
+    this.ranked = false;
+    this.match = null;
   }
+
+  /** 지금 쓸 수 있는 내 칩 (랭크전이면 랭크 칩, 아니면 뱅크롤) */
+  get available() { return this.ranked ? (this.match ? this.match.stack : 0) : S.bankroll; }
+  get matchActive() { return this.ranked && this.match !== null && this.match.result === null; }
 
   name(i) { return this.seats[i].names[['ko', 'en', 'ja'].indexOf(prefs.lang)]; }
   intro() { return T('빅블라인드를 정하고 딜을 누르세요 · 리밋 홀덤', "Set the big blind and deal · Limit Hold'em", 'ビッグブラインドを決めてディール · リミットホールデム'); }
@@ -291,8 +300,14 @@ class Holdem {
 
   startHand() {
     if (this.inHand) return;
-    this.bb = Math.round(effectiveBet());
-    if (S.bankroll < this.bb || this.bb <= 0) {
+    if (this.ranked) {
+      const m = this.match;
+      if (!m || m.result || m.hand >= RANK.hands || m.stack < RANK.bb) return;
+      this.bb = RANK.bb;
+    } else {
+      this.bb = Math.round(effectiveBet());
+    }
+    if (!this.ranked && (S.bankroll < this.bb || this.bb <= 0)) {
       toast(T(`빅블라인드(${fmt(this.bb)})만큼의 돈이 필요해요`, `You need at least the big blind (${fmt(this.bb)})`, `ビッグブラインド(${fmt(this.bb)})分のお金が必要です`));
       return;
     }
@@ -316,7 +331,11 @@ class Holdem {
   /** 칩을 팟에 넣는다. 사람은 실제 뱅크롤에서 차감 */
   put(i, amount) {
     let a = amount;
-    if (this.seats[i].human) {
+    if (this.seats[i].human && this.ranked && this.match) {
+      a = Math.min(a, this.match.stack);
+      this.match.stack -= a;
+      if (this.match.stack <= 0) this.seats[i].allIn = true;
+    } else if (this.seats[i].human) {
       a = Math.min(a, S.bankroll);
       S.bankroll -= a;
       if (S.bankroll <= 0) this.seats[i].allIn = true;
@@ -403,6 +422,11 @@ class Holdem {
       good = this.strength >= 1.5;
       why = T(`승률 ${pct(eq)} — 올인하기엔 위험한 핸드`, `Equity ${pct(eq)} — too risky to shove`, `勝率 ${pct(eq)} — オールインは危険`);
     }
+    if (this.ranked) {
+      // 랭크전에서는 결과만 기록하고 피드백은 판이 끝난 뒤 정확도로만 보여준다
+      if (this.match) { this.match.decisions++; if (good) this.match.good++; }
+      return;
+    }
     recordDecision(good);
     this.feedback = good ? `👍 ${T('좋은 판단', 'Good decision', '良い判断')} · ${T('승률', 'equity', '勝率')} ${pct(eq)}` : `⚠️ ${why}`;
   }
@@ -442,9 +466,9 @@ class Holdem {
   }
   /** 가진 돈 전부를 팟에 넣는다 */
   shove() {
-    if (!this.humanTurn || S.bankroll <= 0) return;
+    if (!this.humanTurn || this.available <= 0) return;
     this.grade(3);
-    const amount = S.bankroll;
+    const amount = this.available;
     const target = this.seats[0].roundBet + amount;
     this.put(0, amount);
     this.seats[0].action = `${T('올인', 'All-in', 'オールイン')} ${fmt(amount)}`;
@@ -469,6 +493,15 @@ class Holdem {
     const potOdds = call / (this.pot + call);
     const r = Math.random();
     const othersCanAct = [0, 1, 2, 3].some(j => j !== i && !this.seats[j].folded && !this.seats[j].allIn);
+
+    // 랭크전: 낮은 티어의 AI는 가끔 아무렇게나 둔다
+    if (this.ranked && this.match && Math.random() < 0.25 * (1 - this.match.difficulty)) {
+      if (call === 0) s.action = T('체크', 'Check', 'チェック');
+      else if (Math.random() < 0.5) { this.put(i, call); s.action = `${T('콜', 'Call', 'コール')} ${fmt(call)}`; }
+      else { s.folded = true; s.action = T('폴드', 'Fold', 'フォールド'); }
+      this.needsToAct.delete(i);
+      return;
+    }
 
     if (this.canRaise && othersCanAct &&
         ((strength > 1.6 - s.aggression * 0.4 && r < 0.55 + s.aggression * 0.4) || r < s.bluff)) {
@@ -526,13 +559,56 @@ class Holdem {
   endHand() {
     this.inHand = false;
     this.humanTurn = false;
+    if (this.ranked && this.match && !this.match.result) {
+      this.match.hand++;
+      if (this.match.hand >= RANK.hands || this.match.stack < RANK.bb) this.finishMatch();
+    }
     this.onChange();
+  }
+
+  // ----- 랭크전
+
+  startMatch() {
+    if (this.inHand) return;
+    const rating = S.rank.rating;
+    this.match = { hand: 0, stack: RANK.startStack, net: 0, decisions: 0, good: 0, result: null,
+                   difficulty: Math.max(0, Math.min(1, (rating - 600) / 1600)) };
+    this.board = []; this.winners = new Set(); this.win = null; this.feedback = '';
+    for (const s of this.seats) { s.cards = []; s.action = ''; }
+    this.message = T('랭크전 시작 · 20핸드', 'Ranked match · 20 hands', 'ランク戦開始 · 20ハンド');
+    this.startHand();
+  }
+
+  /** 칩 손익과 판단 정확도로 레이팅 변화를 계산한다 */
+  finishMatch() {
+    const m = this.match;
+    const old = S.rank.rating;
+    const netBB = m.net / RANK.bb;
+    const acc = m.decisions > 0 ? m.good / m.decisions : null;
+    const perf = Math.max(-1, Math.min(1, netBB / 30)) * 0.6 + ((acc === null ? 0.6 : acc) - 0.6);
+    const drift = (old - 1000) / 400; // 레이팅이 높을수록 기대치가 높다
+    const placement = S.rank.matches < 5;
+    let delta = Math.round(40 * perf - drift * 8);
+    if (placement) delta *= 2;
+    delta = Math.max(-60, Math.min(60, delta));
+    const now = Math.max(0, old + delta);
+    applyRank(now, delta);
+    m.result = { netBB, accuracy: acc, delta, oldRating: old, newRating: now, placement };
+    const before = tierInfo(old).label, after = tierInfo(now).label;
+    if (before !== after) toast(now > old ? T(`승급! ${after}`, `Promoted to ${after}!`, `昇格！${after}`) : T(`강등: ${after}`, `Demoted to ${after}`, `降格：${after}`));
   }
 
   settleHuman(payout) {
     if (this.humanSettled) return 0;
     this.humanSettled = true;
     const staked = this.seats[0].totalIn;
+    if (this.ranked && this.match) {
+      this.match.stack += payout;
+      const net = payout - staked;
+      this.match.net += net;
+      this.win = net > 0 ? true : net < 0 ? false : null;
+      return net;
+    }
     if (staked === 0 && payout === 0) { this.win = null; return 0; }
     const net = settle('holdem', staked, payout, 0);
     this.win = net > 0 ? true : net < 0 ? false : null;

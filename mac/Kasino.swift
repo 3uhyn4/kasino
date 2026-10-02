@@ -145,6 +145,7 @@ struct SaveData: Codable {
     var stats: [String: GameStats] = [:]
     var curve: [Double] = [1_000_000]     // 뱅크롤 변화 기록
     var bacHistory: [BacResult] = []
+    var rank: RankData? = nil            // 옵셔널: 기존 저장 파일과 호환
     var dtHistory: [BacResult]? = nil    // 옵셔널: 기존 저장 파일과 호환
 }
 
@@ -167,6 +168,78 @@ enum Theme: String, CaseIterable, Identifiable {
         case .dark: return NSAppearance(named: .darkAqua)
         }
     }
+}
+
+// MARK: - 랭크
+
+struct RankData: Codable {
+    var rating = 1000
+    var matches = 0
+    var peak = 1000
+    var recent: [Int] = []       // 최근 레이팅 변화 (최대 10개)
+}
+
+/// 랭크전 한 판(20핸드) 진행 상황
+struct RankMatch {
+    static let bb = 1000.0
+    static let hands = 20
+    static let startStack = 100 * bb
+    var hand = 0
+    var stack = startStack
+    var net = 0.0
+    var decisions = 0
+    var good = 0
+    let difficulty: Double       // 0 = 실수 많은 AI, 1 = 정확한 AI
+    var result: RankResult? = nil
+}
+
+struct RankResult {
+    let netBB: Double
+    let accuracy: Double?
+    let delta: Int
+    let oldRating: Int
+    let newRating: Int
+    let placement: Bool
+}
+
+let tierFloors = [0, 800, 1000, 1200, 1400, 1600, 1800, 2000]
+let tierColors: [Color] = [
+    Color(red: 0.45, green: 0.45, blue: 0.48), Color(red: 0.62, green: 0.40, blue: 0.24),
+    Color(red: 0.55, green: 0.60, blue: 0.66), Color(red: 0.85, green: 0.64, blue: 0.10),
+    Color(red: 0.16, green: 0.62, blue: 0.58), Color(red: 0.25, green: 0.48, blue: 0.95),
+    Color(red: 0.58, green: 0.30, blue: 0.86), Color(red: 0.86, green: 0.20, blue: 0.26),
+]
+var tierNames: [String] {
+    [T("아이언", "Iron", "アイアン"), T("브론즈", "Bronze", "ブロンズ"), T("실버", "Silver", "シルバー"),
+     T("골드", "Gold", "ゴールド"), T("플래티넘", "Platinum", "プラチナ"), T("다이아", "Diamond", "ダイヤ"),
+     T("마스터", "Master", "マスター"), T("그랜드마스터", "Grandmaster", "グランドマスター")]
+}
+
+struct TierInfo {
+    let index: Int
+    let label: String        // 예: 골드 II
+    let color: Color
+    let progress: Double     // 다음 단계까지 진행도 0...1
+    let next: Int?           // 다음 단계 시작 점수
+}
+
+/// 아이언~다이아는 IV~I 네 단계(각 50점), 마스터·그랜드마스터는 단계 없음
+func tierInfo(_ r: Int) -> TierInfo {
+    let idx = tierFloors.lastIndex { $0 <= r } ?? 0
+    let name = tierNames[idx]
+    if idx <= 5 {
+        let lo = idx == 0 ? 600 : tierFloors[idx]
+        let span = (tierFloors[idx + 1] - lo) / 4
+        let d = r < lo ? 0 : min(3, (r - lo) / span)
+        let divLo = lo + d * span
+        let progress = r < lo ? 0 : min(1, Double(r - divLo) / Double(span))
+        return TierInfo(index: idx, label: name + " " + ["IV", "III", "II", "I"][d], color: tierColors[idx],
+                        progress: progress, next: divLo + span)
+    }
+    if idx == 6 {
+        return TierInfo(index: 6, label: name, color: tierColors[6], progress: min(1, Double(r - 1800) / 200), next: 2000)
+    }
+    return TierInfo(index: 7, label: name, color: tierColors[7], progress: 1, next: nil)
 }
 
 // MARK: - 상태
@@ -243,6 +316,18 @@ final class GameState: ObservableObject {
         if s.curve.count > 500 { s.curve.removeFirst(s.curve.count - 500) }
         save()
         return net
+    }
+
+    var rank: RankData { s.rank ?? RankData() }
+    func applyRank(_ newRating: Int, delta: Int) {
+        var r = rank
+        r.rating = newRating
+        r.matches += 1
+        r.peak = max(r.peak, newRating)
+        r.recent.append(delta)
+        if r.recent.count > 10 { r.recent.removeFirst(r.recent.count - 10) }
+        s.rank = r
+        save()
     }
 
     func recordDecision(good: Bool) {
@@ -1277,6 +1362,9 @@ final class HoldemGame: ObservableObject {
     @Published var bb: Double = 0
     @Published var coachEquity: Double? = nil
     @Published var feedback = ""
+    /// 랭크 모드: 뱅크롤과 별개인 고정 칩으로 20핸드를 치고 레이팅을 매긴다
+    @Published var ranked = false
+    @Published var match: RankMatch? = nil
     var deck: [Card] = []
     var raises = 0
     var needsToAct: Set<Int> = []
@@ -1287,6 +1375,9 @@ final class HoldemGame: ObservableObject {
     var active: [Int] { seats.indices.filter { !seats[$0].folded } }
     var toCall: Double { max(0, currentBet - seats[0].roundBet) }
     var canRaise: Bool { raises < 4 }
+    /// 지금 쓸 수 있는 내 칩 (랭크전이면 랭크 칩, 아니면 뱅크롤)
+    var available: Double { ranked ? (match?.stack ?? 0) : (g?.money ?? 0) }
+    var matchActive: Bool { ranked && match != nil && match?.result == nil }
     var humanHandName: String {
         let all = seats[0].cards + board
         if all.count >= 5 { return handName(bestScore(all)) }
@@ -1307,8 +1398,13 @@ final class HoldemGame: ObservableObject {
 
     func startHand() {
         guard let g, !inHand else { return }
-        bb = g.effectiveBet.rounded()
-        guard g.money >= bb else { g.show(T("💸 빅블라인드(\(fmt(bb)))만큼의 돈이 필요해요", "💸 You need at least the big blind (\(fmt(bb)))", "💸 ビッグブラインド(\(fmt(bb)))分のお金が必要です")); return }
+        if ranked {
+            guard let m = match, m.result == nil, m.hand < RankMatch.hands, m.stack >= RankMatch.bb else { return }
+            bb = RankMatch.bb
+        } else {
+            bb = g.effectiveBet.rounded()
+        }
+        guard ranked || g.money >= bb else { g.show(T("💸 빅블라인드(\(fmt(bb)))만큼의 돈이 필요해요", "💸 You need at least the big blind (\(fmt(bb)))", "💸 ビッグブラインド(\(fmt(bb)))分のお金が必要です")); return }
         deck = Card.deck()
         board = []; street = 0; showdown = false; win = nil; winners = []; humanSettled = false
         feedback = ""; coachEquity = nil
@@ -1332,7 +1428,11 @@ final class HoldemGame: ObservableObject {
     /// 칩을 팟에 넣는다. 사람은 실제 소지금에서 차감
     func put(_ i: Int, _ amount: Double) {
         var a = amount
-        if seats[i].isHuman, let g {
+        if seats[i].isHuman && ranked, match != nil {
+            a = min(a, match!.stack)
+            match!.stack -= a
+            if match!.stack <= 0 { seats[i].allIn = true }
+        } else if seats[i].isHuman, let g {
             a = min(a, g.s.bankroll)
             g.s.bankroll -= a
             if g.s.bankroll <= 0 { seats[i].allIn = true }
@@ -1425,6 +1525,12 @@ final class HoldemGame: ObservableObject {
             good = strength >= 1.5
             why = T("승률 \(pct(eq)) — 올인하기엔 위험한 핸드", "Equity \(pct(eq)) — too risky to shove", "勝率 \(pct(eq)) — オールインは危険")
         }
+        if ranked {
+            // 랭크전에서는 결과만 기록하고 피드백은 판이 끝난 뒤 정확도로만 보여준다
+            match?.decisions += 1
+            if good { match?.good += 1 }
+            return
+        }
         g.recordDecision(good: good)
         feedback = good ? "👍 " + T("좋은 판단", "Good decision", "良い判断") + " · " + T("승률", "equity", "勝率") + " \(pct(eq))"
                         : "⚠️ " + why
@@ -1461,9 +1567,9 @@ final class HoldemGame: ObservableObject {
 
     /// 가진 돈 전부를 팟에 넣는다
     func humanAllIn() {
-        guard humanTurn, let g, g.s.bankroll > 0 else { return }
+        guard humanTurn, available > 0 else { return }
         grade(3)
-        let amount = g.s.bankroll
+        let amount = available
         let target = seats[0].roundBet + amount
         put(0, amount)
         seats[0].action = T("올인", "All-in", "オールイン") + " \(fmt(amount))"
@@ -1495,6 +1601,21 @@ final class HoldemGame: ObservableObject {
         let potOdds = call / (pot + call)
         let r = Double.random(in: 0..<1)
         let othersCanAct = seats.indices.contains { $0 != i && !seats[$0].folded && !seats[$0].allIn }
+
+        // 랭크전: 낮은 티어의 AI는 가끔 아무렇게나 둔다
+        if ranked, let d = match?.difficulty, Double.random(in: 0..<1) < 0.25 * (1 - d) {
+            if call == 0 {
+                seats[i].action = T("체크", "Check", "チェック")
+            } else if Bool.random() {
+                put(i, call)
+                seats[i].action = T("콜", "Call", "コール") + " \(fmt(call))"
+            } else {
+                seats[i].folded = true
+                seats[i].action = T("폴드", "Fold", "フォールド")
+            }
+            needsToAct.remove(i)
+            return
+        }
 
         if canRaise && othersCanAct &&
             ((strength > 1.6 - s.aggression * 0.4 && r < 0.55 + s.aggression * 0.4) || r < s.bluff) {
@@ -1554,6 +1675,44 @@ final class HoldemGame: ObservableObject {
     func endHand() {
         inHand = false
         humanTurn = false
+        if ranked, match != nil, match!.result == nil {
+            match!.hand += 1
+            if match!.hand >= RankMatch.hands || match!.stack < RankMatch.bb { finishMatch() }
+        }
+    }
+
+    // MARK: 랭크전
+
+    func startMatch() {
+        guard let g, !inHand else { return }
+        let rating = g.rank.rating
+        match = RankMatch(difficulty: max(0, min(1, Double(rating - 600) / 1600)))
+        board = []; winners = []; win = nil; feedback = ""
+        for i in seats.indices { seats[i].cards = []; seats[i].action = "" }
+        message = T("랭크전 시작 · 20핸드", "Ranked match · 20 hands", "ランク戦開始 · 20ハンド")
+        startHand()
+    }
+
+    /// 칩 손익과 판단 정확도로 레이팅 변화를 계산한다
+    func finishMatch() {
+        guard let g, let m = match else { return }
+        let old = g.rank.rating
+        let netBB = m.net / RankMatch.bb
+        let acc: Double? = m.decisions > 0 ? Double(m.good) / Double(m.decisions) : nil
+        let perf = max(-1, min(1, netBB / 30)) * 0.6 + ((acc ?? 0.6) - 0.6)
+        let drift = Double(old - 1000) / 400          // 레이팅이 높을수록 기대치가 높다
+        let placement = g.rank.matches < 5
+        var delta = Int((40 * perf - drift * 8).rounded())
+        if placement { delta *= 2 }
+        delta = max(-60, min(60, delta))
+        let new = max(0, old + delta)
+        g.applyRank(new, delta: delta)
+        match!.result = RankResult(netBB: netBB, accuracy: acc, delta: delta, oldRating: old, newRating: new, placement: placement)
+        let before = tierInfo(old), after = tierInfo(new)
+        if after.label != before.label {
+            g.show(new > old ? T("승급! \(after.label)", "Promoted to \(after.label)!", "昇格！\(after.label)")
+                             : T("강등: \(after.label)", "Demoted to \(after.label)", "降格：\(after.label)"))
+        }
     }
 
     @discardableResult
@@ -1561,6 +1720,13 @@ final class HoldemGame: ObservableObject {
         guard !humanSettled, let g else { return 0 }
         humanSettled = true
         let staked = seats[0].totalIn
+        if ranked, match != nil {
+            match!.stack += payout
+            let net = payout - staked
+            match!.net += net
+            win = net > 0 ? true : (net < 0 ? false : nil)
+            return net
+        }
         if staked == 0 && payout == 0 { win = nil; return 0 }
         let net = g.settle(.holdem, bet: staked, payout: payout, expectedLoss: 0)
         win = net > 0 ? true : (net < 0 ? false : nil)
@@ -1569,11 +1735,109 @@ final class HoldemGame: ObservableObject {
     }
 }
 
+/// 랭크 모드 대기 화면: 티어, 레이팅, 직전 결과, 시작 버튼
+struct RankLobby: View {
+    @EnvironmentObject var g: GameState
+    @ObservedObject var h: HoldemGame
+
+    var body: some View {
+        let r = g.rank
+        let t = tierInfo(r.rating)
+        VStack(spacing: 12) {
+            HStack(spacing: 14) {
+                ZStack {
+                    Circle().fill(t.color.opacity(0.18))
+                    Circle().stroke(t.color, lineWidth: 3)
+                    Text(String(tierNames[t.index].prefix(1))).font(.system(size: 30, weight: .heavy)).foregroundColor(t.color)
+                }
+                .frame(width: 72, height: 72)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(t.label).font(.title2.weight(.bold)).foregroundColor(t.color)
+                    Text("\(r.rating)").font(.title3.weight(.semibold).monospacedDigit())
+                    if let next = t.next {
+                        ProgressView(value: t.progress).tint(t.color)
+                        Text(T("다음 단계까지 \(max(0, next - r.rating))점", "\(max(0, next - r.rating)) pts to next", "次まで\(max(0, next - r.rating))点"))
+                            .font(.caption2).foregroundColor(.secondary)
+                    }
+                }
+                Spacer()
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.08)))
+
+            HStack {
+                stat(T("랭크전", "Matches", "試合数"), "\(r.matches)")
+                stat(T("최고", "Peak", "最高"), "\(r.peak)")
+                stat(T("최근", "Recent", "最近"), r.recent.isEmpty ? "—" : r.recent.suffix(5).map { $0 >= 0 ? "+\($0)" : "\($0)" }.joined(separator: " "))
+            }
+
+            if let res = h.match?.result {
+                VStack(spacing: 4) {
+                    Text(T("지난 판 결과", "Last match", "前回の結果")).font(.caption.bold()).foregroundColor(.secondary)
+                    Text((res.delta >= 0 ? "+" : "") + "\(res.delta)")
+                        .font(.title.weight(.bold).monospacedDigit())
+                        .foregroundColor(res.delta > 0 ? .green : (res.delta < 0 ? .red : .secondary))
+                    Text(T("칩", "Chips", "チップ") + " " + (res.netBB >= 0 ? "+" : "−") + fmt(abs(res.netBB)) + " BB · "
+                         + T("판단 정확도", "Accuracy", "判断精度") + " " + (res.accuracy.map(pct) ?? "—"))
+                        .font(.caption.monospacedDigit())
+                    if res.placement {
+                        Text(T("배치고사 (변동 2배)", "Placement match (double change)", "配置戦（変動2倍）")).font(.caption2).foregroundColor(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 10).stroke(Color.secondary.opacity(0.25)))
+            }
+
+            Button { h.startMatch() } label: {
+                Text(T("랭크전 시작 · 20핸드", "Start ranked match · 20 hands", "ランク戦開始 · 20ハンド"))
+                    .bold().frame(maxWidth: .infinity, minHeight: 28)
+            }
+            .buttonStyle(.solid(Solid.green))
+
+            Text(T("100BB로 20핸드를 칩니다. 칩 손익과 판단 정확도로 점수가 바뀌고, 코치는 꺼져요. 뱅크롤에는 영향이 없어요. 티어가 오를수록 AI가 정확해집니다.",
+                   "You play 20 hands with 100 BB. Your rating moves with chips won and decision accuracy. No coach, and your bankroll isn't touched. AI opponents get sharper as you climb.",
+                   "100BBで20ハンドをプレイします。チップ損益と判断の正確さでレートが変動し、コーチはオフ。残高には影響しません。ティアが上がるほどAIが正確になります。"))
+                .font(.caption2).foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+    }
+
+    func stat(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.caption2).foregroundColor(.secondary)
+            Text(value).font(.callout.weight(.semibold).monospacedDigit()).lineLimit(1).minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
+    }
+}
+
 struct HoldemView: View {
     @EnvironmentObject var g: GameState
     @ObservedObject var h: HoldemGame
 
     var body: some View {
+        VStack(spacing: 8) {
+            Picker("", selection: $h.ranked) {
+                Text(T("연습", "Practice", "練習")).tag(false)
+                Text(T("랭크", "Ranked", "ランク")).tag(true)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .disabled(h.inHand || h.matchActive)
+
+            if h.ranked && !h.matchActive && !h.inHand {
+                RankLobby(h: h)
+            } else {
+                table
+            }
+        }
+    }
+
+    var table: some View {
         VStack(spacing: 8) {
             HStack(spacing: 6) {
                 ForEach(1..<4, id: \.self) { aiSeat($0) }
@@ -1613,11 +1877,29 @@ struct HoldemView: View {
                 h.winners.contains(0) ? Color.yellow.opacity(0.25)
                 : (h.humanTurn ? Color.orange.opacity(0.12) : Color.secondary.opacity(0.06))))
 
-            if g.showCoach { coachBar }
+            if g.showCoach && !h.ranked { coachBar }
+            if h.ranked, let m = h.match {
+                HStack {
+                    Text(T("랭크전", "Ranked", "ランク戦") + " · " + T("핸드", "Hand", "ハンド") + " \(min(m.hand + 1, RankMatch.hands))/\(RankMatch.hands)")
+                    Spacer()
+                    Text(T("칩", "Chips", "チップ") + " \(fmt(m.stack / RankMatch.bb)) BB")
+                    Text("(" + (m.net >= 0 ? "+" : "−") + fmt(abs(m.net) / RankMatch.bb) + ")")
+                        .foregroundColor(m.net > 0 ? .green : (m.net < 0 ? .red : .secondary))
+                }
+                .font(.caption.weight(.medium).monospacedDigit())
+                .padding(.horizontal, 8)
+                .frame(height: 30)
+                .background(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.25)))
+            }
 
             ResultText(text: h.message, win: h.win)
 
-            if !h.inHand {
+            if !h.inHand && h.ranked {
+                Button { h.startHand() } label: {
+                    Text(T("다음 핸드", "Next hand", "次のハンド")).bold().frame(maxWidth: .infinity, minHeight: 24)
+                }
+                .buttonStyle(.solid(Solid.green))
+            } else if !h.inHand {
                 BetControl(label: T("빅블라인드", "Big blind", "BB"))
                 Button { h.startHand() } label: {
                     Text(T("딜", "Deal", "ディール") + " · BB \(fmt(g.effectiveBet))").bold().frame(maxWidth: .infinity, minHeight: 24)
@@ -1629,7 +1911,7 @@ struct HoldemView: View {
                         .buttonStyle(.solid(Solid.red))
                     Button { h.humanCall() } label: {
                         Text(h.toCall == 0 ? T("체크", "Check", "チェック")
-                             : (g.money <= h.toCall ? T("올인", "All-in", "オールイン") + " \(fmt(g.money))"
+                             : (h.available <= h.toCall ? T("올인", "All-in", "オールイン") + " \(fmt(h.available))"
                                                     : T("콜", "Call", "コール") + " \(fmt(h.toCall))"))
                             .frame(maxWidth: .infinity, minHeight: 24)
                     }
@@ -1640,12 +1922,12 @@ struct HoldemView: View {
                             .frame(maxWidth: .infinity, minHeight: 24)
                     }
                     .buttonStyle(.solid(Solid.orange))
-                    .disabled(!h.canRaise || g.money < h.toCall + h.betSize)
+                    .disabled(!h.canRaise || h.available < h.toCall + h.betSize)
                     Button { h.humanAllIn() } label: {
                         Text(T("올인", "All-in", "オールイン")).frame(maxWidth: .infinity, minHeight: 24)
                     }
                     .buttonStyle(.solid(Solid.purple))
-                    .disabled(g.money <= 0)
+                    .disabled(h.available <= 0)
                 }
                 .font(.callout.weight(.semibold))
             } else {
@@ -1976,6 +2258,8 @@ struct StatsView: View {
                 let hs = g.stats(.holdem)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(T("실력", "Skill", "実力")).font(.caption.bold()).foregroundColor(.secondary)
+                    row(T("홀덤 랭크", "Hold'em rank", "ホールデムランク"),
+                        g.rank.matches == 0 ? "—" : "\(tierInfo(g.rank.rating).label) · \(g.rank.rating) (\(T("최고", "peak", "最高")) \(g.rank.peak))")
                     row(T("홀덤 판단 정확도", "Hold'em decision accuracy", "ホールデム判断の正確さ"),
                         hs.accuracy.map { "\(pct($0)) (\(hs.goodDecisions)/\(hs.decisions))" } ?? "—")
                     row(T("최장 연승 / 연패", "Longest win / loss streak", "最長連勝 / 連敗"),
@@ -2145,7 +2429,7 @@ struct ContentView: View {
                 default: SettingsView()
                 }
             }
-            .frame(height: 400, alignment: .top)
+            .frame(height: 430, alignment: .top)
 
             Text(g.toast.isEmpty ? " " : g.toast)
                 .font(.caption)
