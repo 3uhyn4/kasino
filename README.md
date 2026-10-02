@@ -15,6 +15,7 @@ It's for practice only. There's no real money involved, nothing to buy, and noth
 - Dragon tiger with its own roadmap
 - European roulette. Click as many numbers or areas as you like, then spin once
 - Limit hold'em against three AI players. An optional coach shows your equity and the pot odds on your turn, suggests an action, and tells you afterwards whether your call was a good one
+- Ranked hold'em: 20-hand matches with a rating and tiers from Iron to Grandmaster. Sign in with a username and password to appear on the global leaderboard
 - Slots
 - A stats page with win rate and results per game, a bankroll chart, and a luck index (your actual result minus what the house edge says you should expect)
 - Korean, English and Japanese, light and dark mode
@@ -37,4 +38,6 @@ Pushing a tag like `v1.0.1` builds both versions on GitHub Actions and attaches 
 
 ## Privacy
 
-Kasino doesn't collect or send anything. All data stays on your computer.
+Signing in is optional. Without an account, nothing leaves your computer.
+
+If you create an account, Kasino stores your username, nickname, rating and a hashed password (never the password itself) on a Supabase server in Seoul, so the leaderboard can show your rank. No email or other personal information is collected. You can delete your account and its leaderboard entry at any time under Settings > Account.
