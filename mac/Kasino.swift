@@ -146,6 +146,7 @@ struct SaveData: Codable {
     var curve: [Double] = [1_000_000]     // 뱅크롤 변화 기록
     var bacHistory: [BacResult] = []
     var dtHistory: [BacResult]? = nil    // 옵셔널: 기존 저장 파일과 호환
+    var rouHistory: [Int]? = nil         // 룰렛 최근 결과 (최신이 앞)
 }
 
 // MARK: - 테마
@@ -336,6 +337,20 @@ final class GameState: ObservableObject {
         if h.count > 150 { h.removeFirst(h.count - 150) }
         s.dtHistory = h
     }
+    // 룰렛 기록
+    var rouHistory: [Int] { s.rouHistory ?? [] }
+    func recordRoulette(_ n: Int) {
+        var h = rouHistory
+        h.insert(n, at: 0)
+        if h.count > 100 { h.removeLast(h.count - 100) }
+        s.rouHistory = h
+        save()
+    }
+    func clearRoulette() {
+        s.rouHistory = []
+        save()
+    }
+
     func newDTShoe() {
         s.dtHistory = []
         save()
@@ -365,6 +380,7 @@ final class GameState: ObservableObject {
         s.curve = [s.bankroll]
         s.bacHistory = []
         s.dtHistory = []
+        s.rouHistory = []
         sessionStart = s.bankroll
         save()
         show(T("통계를 초기화했어요", "Stats cleared", "統計をリセットしました"))
@@ -1074,6 +1090,69 @@ enum Spot: Hashable {
     }
 }
 
+/// 룰렛 기록 요약: 색·홀짝·구간 비율, 많이 나온 번호와 오래 안 나온 번호
+struct RouletteStats: View {
+    let history: [Int]
+
+    var body: some View {
+        let h = history
+        let total = Double(max(h.count, 1))
+        let share = { (k: Int) in h.isEmpty ? "—" : String(format: "%.0f%%", Double(k) / total * 100) }
+        let red = h.filter { redNumbers.contains($0) }.count
+        let zero = h.filter { $0 == 0 }.count
+        var counts = [Int](repeating: 0, count: 37)
+        for n in h { counts[n] += 1 }
+        let hot = (0...36).filter { counts[$0] > 1 }.sorted { counts[$0] > counts[$1] }.prefix(4)
+        // 가장 오래 안 나온 번호: 최근 기록에서 처음 나오는 위치가 가장 먼(또는 아예 없는) 번호
+        let gap = { (n: Int) in h.firstIndex(of: n) ?? h.count + 1 }
+        let cold = h.count < 20 ? [] : Array((0...36).sorted { gap($0) > gap($1) }.prefix(4))
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 10) {
+                pair(T("빨강", "Red", "赤"), share(red), Color.red)
+                pair(T("검정", "Black", "黒"), share(h.count - red - zero), Color.primary)
+                pair("0", share(zero), Color.green)
+                Divider().frame(height: 12)
+                pair(T("홀", "Odd", "奇"), share(h.filter { $0 != 0 && $0 % 2 == 1 }.count), Color.secondary)
+                pair(T("짝", "Even", "偶"), share(h.filter { $0 != 0 && $0 % 2 == 0 }.count), Color.secondary)
+            }
+            HStack(spacing: 10) {
+                pair("1-18", share(h.filter { (1...18).contains($0) }.count), Color.secondary)
+                pair("19-36", share(h.filter { (19...36).contains($0) }.count), Color.secondary)
+                Divider().frame(height: 12)
+                ForEach(1...3, id: \.self) { d in
+                    pair(["1st", "2nd", "3rd"][d - 1], share(h.filter { $0 != 0 && ($0 - 1) / 12 == d - 1 }.count), Color.secondary)
+                }
+            }
+            HStack(spacing: 14) {
+                balls(T("많이 나온 번호", "Hot", "よく出る"), Array(hot))
+                balls(T("오래 안 나온 번호", "Cold", "出ていない"), cold)
+            }
+        }
+        .font(.caption2.monospacedDigit())
+        .padding(.horizontal, 8).padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
+    }
+
+    func pair(_ label: String, _ value: String, _ color: Color) -> some View {
+        HStack(spacing: 3) {
+            Text(label).foregroundColor(color == .secondary ? .secondary : color).fontWeight(.semibold)
+            Text(value)
+        }
+    }
+
+    func balls(_ label: String, _ nums: [Int]) -> some View {
+        HStack(spacing: 2) {
+            Text(label).foregroundColor(.secondary).fontWeight(.semibold).fixedSize()
+            if nums.isEmpty { Text("—") }
+            ForEach(nums, id: \.self) { n in
+                Text("\(n)").font(.system(size: 8, weight: .bold).monospacedDigit()).foregroundColor(.white)
+                    .frame(width: 15, height: 15).background(Circle().fill(rouletteColor(n)))
+            }
+        }
+    }
+}
+
 struct RouletteView: View {
     @EnvironmentObject var g: GameState
     @State private var selected: Set<Spot> = []
@@ -1082,7 +1161,6 @@ struct RouletteView: View {
     @State private var result = T("숫자·구역을 눌러 칩을 놓고 스핀하세요", "Click numbers/areas to place chips, then spin", "数字やエリアをクリックしてチップを置き、スピン")
     @State private var detail = ""
     @State private var win: Bool? = nil
-    @State private var history: [Int] = []
 
     let cellW: CGFloat = 24, cellH: CGFloat = 22, zeroW: CGFloat = 26, colW: CGFloat = 30
 
@@ -1104,17 +1182,28 @@ struct RouletteView: View {
                 .rotationEffect(.degrees(spinning ? 360 : 0))
                 .animation(spinning ? .linear(duration: 0.4).repeatForever(autoreverses: false) : .default, value: spinning)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(T("최근 결과", "Recent", "最近の結果")).font(.caption).foregroundColor(.secondary)
-                    HStack(spacing: 3) {
-                        ForEach(Array(history.prefix(9).enumerated()), id: \.offset) { _, n in
-                            Text("\(n)").font(.caption2.bold()).foregroundColor(.white)
-                                .frame(width: 22, height: 22).background(Circle().fill(rouletteColor(n)))
+                    HStack {
+                        Text(T("최근 결과", "Recent", "最近の結果") + (g.rouHistory.isEmpty ? "" : " · " + T("\(g.rouHistory.count)판", "\(g.rouHistory.count) spins", "\(g.rouHistory.count)回")))
+                            .font(.caption).foregroundColor(.secondary)
+                        Spacer()
+                        if !g.rouHistory.isEmpty {
+                            Button(T("지우기", "Clear", "クリア")) { g.clearRoulette() }
+                                .buttonStyle(.plain).font(.caption2).foregroundColor(.secondary)
+                                .disabled(spinning)
                         }
                     }
-                    .frame(height: 22)
+                    LazyVGrid(columns: Array(repeating: GridItem(.fixed(20), spacing: 2), count: 9), alignment: .leading, spacing: 2) {
+                        ForEach(Array(g.rouHistory.prefix(18).enumerated()), id: \.offset) { _, n in
+                            Text("\(n)").font(.system(size: 9, weight: .bold).monospacedDigit()).foregroundColor(.white)
+                                .frame(width: 20, height: 20).background(Circle().fill(rouletteColor(n)))
+                        }
+                    }
+                    .frame(height: 42, alignment: .top)
                 }
                 Spacer()
             }
+
+            RouletteStats(history: g.rouHistory)
 
             VStack(spacing: 2) {
                 ResultText(text: result, win: win)
@@ -1210,7 +1299,7 @@ struct RouletteView: View {
             }
             let n = Int.random(in: 0...36)
             number = n
-            history.insert(n, at: 0)
+            g.recordRoulette(n)
             spinning = false
             let hits = spots.filter { $0.wins(n) }
             let payout = hits.reduce(0.0) { $0 + per * $1.multiplier }

@@ -246,7 +246,32 @@ function spotLabel(s) {
   }[k];
 }
 
-const rou = { selected: new Set(), number: null, spinning: false, result: '', detail: '', win: null, history: [] };
+const rou = { selected: new Set(), number: null, spinning: false, result: '', detail: '', win: null };
+
+/** 룰렛 기록 요약: 색·홀짝·구간 비율, 많이 나온 번호와 오래 안 나온 번호 */
+function rouletteStats(hist) {
+  const total = Math.max(hist.length, 1);
+  const share = k => (hist.length ? `${Math.round((k / total) * 100)}%` : '—');
+  const count = f => hist.filter(f).length;
+  const red = count(n => RED.has(n)), zero = count(n => n === 0);
+  const counts = Array(37).fill(0);
+  hist.forEach(n => counts[n]++);
+  const hot = [...Array(37).keys()].filter(n => counts[n] > 1).sort((a, b) => counts[b] - counts[a]).slice(0, 4);
+  // 가장 오래 안 나온 번호: 최근 기록에서 처음 나오는 위치가 가장 먼(또는 아예 없는) 번호
+  const gap = n => { const i = hist.indexOf(n); return i < 0 ? hist.length + 1 : i; };
+  const cold = hist.length < 20 ? [] : [...Array(37).keys()].sort((a, b) => gap(b) - gap(a)).slice(0, 4);
+  const pair = (label, value, cls = 'muted') => h('span', { class: 'pair' }, h('b', { class: cls }, label), ' ', value);
+  const sep = () => h('span', { class: 'sep' });
+  const balls = (label, nums) => h('span', { class: 'pair' }, h('b', { class: 'muted' }, label), ' ',
+    nums.length ? nums.map(n => h('span', { class: 'ball tiny ' + rouletteColor(n) }, n)) : '—');
+  return h('div', { class: 'panel rstats' },
+    h('div', {}, pair(T('빨강', 'Red', '赤'), share(red), 'red'), pair(T('검정', 'Black', '黒'), share(hist.length - red - zero), ''),
+      pair('0', share(zero), 'pos'), sep(),
+      pair(T('홀', 'Odd', '奇'), share(count(n => n !== 0 && n % 2 === 1))), pair(T('짝', 'Even', '偶'), share(count(n => n !== 0 && n % 2 === 0)))),
+    h('div', {}, pair('1-18', share(count(n => n >= 1 && n <= 18))), pair('19-36', share(count(n => n >= 19))), sep(),
+      ...[1, 2, 3].map(d => pair(['1st', '2nd', '3rd'][d - 1], share(count(n => n !== 0 && Math.floor((n - 1) / 12) === d - 1))))),
+    h('div', {}, balls(T('많이 나온 번호', 'Hot', 'よく出る'), hot), balls(T('오래 안 나온 번호', 'Cold', '出ていない'), cold)));
+}
 
 function rouletteView() {
   const n = rou.selected.size;
@@ -273,9 +298,13 @@ function rouletteView() {
   return h('div', { class: 'stack' },
     h('div', { class: 'row gap14' },
       h('div', { class: 'wheel ' + (rou.number === null ? 'none' : rouletteColor(rou.number)) + (rou.spinning ? ' spin' : '') }, rou.number === null ? '?' : rou.number),
-      h('div', {},
-        h('small', { class: 'muted' }, T('최근 결과', 'Recent', '最近の結果')),
-        h('div', { class: 'row gap3 hist' }, rou.history.slice(0, 9).map(x => h('span', { class: 'ball ' + rouletteColor(x) }, x))))),
+      h('div', { class: 'grow1' },
+        h('div', { class: 'row center' },
+          h('small', { class: 'muted' }, T('최근 결과', 'Recent', '最近の結果') + (S.rouHistory.length ? ` · ${T(`${S.rouHistory.length}판`, `${S.rouHistory.length} spins`, `${S.rouHistory.length}回`)}` : '')),
+          h('span', { class: 'spacer' }),
+          S.rouHistory.length ? h('button', { class: 'linkbtn', disabled: rou.spinning, onclick: () => { S.rouHistory = []; save(); render(); } }, T('지우기', 'Clear', 'クリア')) : null),
+        h('div', { class: 'hist' }, S.rouHistory.slice(0, 18).map(x => h('span', { class: 'ball ' + rouletteColor(x) }, x))))),
+    rouletteStats(S.rouHistory),
     h('div', {}, resultText(rou.result || T('숫자·구역을 눌러 칩을 놓고 스핀하세요', 'Click numbers/areas to place chips, then spin', '数字やエリアをクリックしてチップを置き、スピン'), rou.win),
       h('div', { class: 'detail' }, rou.detail || ' ')),
     grid,
@@ -298,7 +327,9 @@ async function spinRoulette() {
   for (let i = 0; i < 18; i++) { rou.number = randInt(37); render(); await sleep(50 + i * 12); }
   const n = randInt(37);
   rou.number = n;
-  rou.history.unshift(n);
+  S.rouHistory.unshift(n);
+  if (S.rouHistory.length > 100) S.rouHistory.length = 100;
+  save();
   rou.spinning = false;
   const hits = spots.filter(s => spotWins(s, n));
   const payout = hits.reduce((a, s) => a + per * spotMultiplier(s), 0);

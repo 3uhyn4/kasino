@@ -13,7 +13,7 @@ It's for practice only. There's no real money involved, nothing to buy, and noth
 
 - Baccarat with pair and dragon bonus side bets, plus the full roadmap (bead plate, big road, big eye boy, small road, cockroach pig)
 - Dragon tiger with its own roadmap
-- European roulette. Click as many numbers or areas as you like, then spin once
+- European roulette. Click as many numbers or areas as you like, then spin once. It keeps your last 100 spins with red/black, odd/even and dozen percentages, plus hot and cold numbers
 - Limit hold'em against three AI players. An optional coach shows your equity and the pot odds on your turn, suggests an action, and tells you afterwards whether your call was a good one
 - Ranked mode: sign up with a username and password and you get 1,000 chips. Every game uses them, and everyone is ranked by how many chips they hold. Your practice bankroll stays separate
 - Slots

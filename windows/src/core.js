@@ -95,7 +95,7 @@ const accuracy = s => (s.decisions > 0 ? s.goodDecisions / s.decisions : null);
 
 const SAVE_KEY = 'kasino-v1';
 const S = Object.assign(
-  { bankroll: 1e6, startBankroll: 1e6, stats: {}, curve: [1e6], bacHistory: [], dtHistory: [] },
+  { bankroll: 1e6, startBankroll: 1e6, stats: {}, curve: [1e6], bacHistory: [], dtHistory: [], rouHistory: [] },
   safeParse(localStorage.getItem(SAVE_KEY))
 );
 function save() { localStorage.setItem(SAVE_KEY, JSON.stringify(S)); }
@@ -232,6 +232,7 @@ function resetStats() {
   S.curve = [S.bankroll];
   S.bacHistory = [];
   S.dtHistory = [];
+  S.rouHistory = [];
   sessionStart = S.bankroll;
   save();
   toast(T('통계를 초기화했어요', 'Stats cleared', '統計をリセットしました'));

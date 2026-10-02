@@ -157,7 +157,17 @@ canvas.road { border-radius: 3px; }
 .wheel.green, .ball.green, .rcell.green { background: #16a34a; }
 .wheel.spin { animation: spin 0.4s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.hist { min-height: 22px; margin-top: 4px; }
+.hist { display: grid; grid-template-columns: repeat(9, 20px); gap: 2px; height: 42px; margin-top: 4px; align-content: start; }
+.hist .ball { width: 20px; height: 20px; font-size: 9px; }
+.grow1 { flex: 1; }
+.linkbtn { border: 0; background: none; color: var(--muted); font: inherit; font-size: 11px; cursor: pointer; padding: 0; }
+.rstats { font-size: 11px; display: flex; flex-direction: column; gap: 3px; padding: 5px 8px; font-variant-numeric: tabular-nums; }
+.rstats > div { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+.rstats .pair { display: inline-flex; align-items: center; gap: 2px; }
+.rstats b.red { color: var(--red); }
+.rstats .sep { width: 1px; height: 11px; background: var(--line); }
+.ball.tiny { width: 15px; height: 15px; font-size: 8px; }
+.ball.black { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28); }
 .ball { width: 22px; height: 22px; border-radius: 50%; color: #fff; font-size: 10px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
 .rgrid { display: grid; grid-template-columns: 28px repeat(12, 1fr) 32px; grid-auto-rows: 22px; gap: 1px; }
 .rcell { border: 0; color: #fff; font: 700 10px system-ui, sans-serif; cursor: pointer; position: relative; padding: 0; opacity: 0.9; }
