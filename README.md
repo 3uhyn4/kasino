@@ -9,6 +9,19 @@ Kasino lets you play baccarat, dragon tiger, roulette, hold'em and slots with a 
 
 It's for practice only. There's no real money involved, nothing to buy, and nothing to cash out.
 
+<p align="center"><img src="docs/demo.gif" width="360" alt="Kasino"></p>
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/en-baccarat.png" alt=""></td>
+    <td><img src="docs/screenshots/en-roulette.png" alt=""></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/en-holdem.png" alt=""></td>
+    <td><img src="docs/screenshots/en-stats.png" alt=""></td>
+  </tr>
+</table>
+
 ## What's in it
 
 - Baccarat with pair and dragon bonus side bets, plus the full roadmap (bead plate, big road, big eye boy, small road, cockroach pig)

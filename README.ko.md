@@ -9,6 +9,19 @@
 
 연습용이라 실제 돈은 오가지 않습니다. 결제나 환전 기능도 없습니다.
 
+<p align="center"><img src="docs/demo.gif" width="360" alt="Kasino"></p>
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/ko-baccarat.png" alt=""></td>
+    <td><img src="docs/screenshots/ko-roulette.png" alt=""></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/ko-holdem.png" alt=""></td>
+    <td><img src="docs/screenshots/ko-stats.png" alt=""></td>
+  </tr>
+</table>
+
 ## 들어 있는 것
 
 - 바카라: 페어, 드래곤 보너스 사이드 베팅. 그림장(본매, 대로, 대안로, 소로, 바퀴벌레) 전부 지원
