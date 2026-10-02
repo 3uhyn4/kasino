@@ -593,6 +593,7 @@ class Holdem {
     delta = Math.max(-60, Math.min(60, delta));
     const now = Math.max(0, old + delta);
     applyRank(now, delta);
+    if (online.signedIn) onlineSubmit(delta);
     m.result = { netBB, accuracy: acc, delta, oldRating: old, newRating: now, placement };
     const before = tierInfo(old).label, after = tierInfo(now).label;
     if (before !== after) toast(now > old ? T(`승급! ${after}`, `Promoted to ${after}!`, `昇格！${after}`) : T(`강등: ${after}`, `Demoted to ${after}`, `降格：${after}`));

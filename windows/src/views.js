@@ -395,8 +395,78 @@ function holdemView() {
     ...controls);
 }
 
-/** 랭크 모드 대기 화면: 티어, 레이팅, 직전 결과, 시작 버튼 */
+let lobbyBoard = false;
+const authForm = { signUp: false, username: '', password: '', nickname: '' };
+
+/** 랭크 모드 대기 화면: 내 랭크 / 전체 순위 */
 function rankLobby() {
+  const sw = h('div', { class: 'seg' },
+    [[false, T('내 랭크', 'My rank', 'マイランク')], [true, T('전체 순위', 'Leaderboard', 'ランキング')]].map(([v, label]) =>
+      h('button', { class: lobbyBoard === v ? 'on' : '', onclick: () => {
+        lobbyBoard = v;
+        if (v) onlineLoadLeaderboard();
+        render();
+      } }, label)));
+  return h('div', { class: 'stack' }, sw, lobbyBoard ? leaderboardView() : myRankView());
+}
+
+function authFormView() {
+  const f = authForm;
+  const field = (id, key, placeholder, type = 'text') => h('input', {
+    id, type, placeholder, value: f[key], autocomplete: 'off', spellcheck: 'false',
+    oninput: e => { f[key] = e.target.value; },
+    onkeydown: e => { if (e.key === 'Enter') submitAuth(); },
+  });
+  return h('div', { class: 'panel authform' },
+    h('div', { class: 'seg small' },
+      [[false, T('로그인', 'Sign in', 'ログイン')], [true, T('가입', 'Sign up', '新規登録')]].map(([v, label]) =>
+        h('button', { class: f.signUp === v ? 'on' : '', onclick: () => { f.signUp = v; online.error = ''; render(); } }, label))),
+    field('auth-user', 'username', T('아이디', 'Username', 'ID')),
+    field('auth-pass', 'password', T('비밀번호', 'Password', 'パスワード'), 'password'),
+    f.signUp ? field('auth-nick', 'nickname', T('닉네임 (순위표에 보여요)', 'Nickname (shown on the leaderboard)', 'ニックネーム（ランキングに表示）')) : null,
+    h('div', { class: 'row gap6 center' },
+      h('button', { class: 'btn blue', disabled: online.busy, onclick: submitAuth },
+        f.signUp ? T('가입하기', 'Create account', '登録') : T('로그인', 'Sign in', 'ログイン')),
+      online.busy ? h('span', { class: 'spinner' }) : null),
+    online.error ? h('small', { class: 'neg' }, online.error) : null,
+    h('small', { class: 'muted' }, f.signUp
+      ? T('이메일은 필요 없어요. 비밀번호를 잊으면 찾을 방법이 없으니 꼭 기억해 두세요.', "No email needed. There's no password reset, so keep it somewhere safe.", 'メール不要です。パスワードの再設定はできないので忘れないでください。')
+      : T('로그인하면 랭크전 결과가 전체 순위표에 올라가요.', 'Sign in to put your ranked results on the global leaderboard.', 'ログインするとランク戦の結果がランキングに載ります。')));
+}
+
+async function submitAuth() {
+  const f = authForm;
+  if (!f.username || !f.password || (f.signUp && !f.nickname)) return;
+  const ok = f.signUp ? await onlineSignUp(f.username, f.password, f.nickname) : await onlineSignIn(f.username, f.password);
+  if (ok) { f.password = ''; onlineLoadLeaderboard(); }
+}
+
+function leaderboardView() {
+  const p = online.profile;
+  const head = online.signedIn
+    ? h('div', { class: 'panel row gap8 center mine' },
+        h('b', {}, p.nickname),
+        h('small', { class: 'b', style: { color: tierInfo(p.rating).color } }, tierInfo(p.rating).label),
+        h('span', { class: 'spacer' }),
+        h('small', { class: 'muted mono' }, p.rank ? T(`전체 ${p.rank}위`, `#${p.rank}`, `全体${p.rank}位`) : T('랭크전 기록 없음', 'No ranked matches yet', 'ランク戦なし')),
+        h('button', { class: 'btn xs', onclick: onlineLoadLeaderboard }, '↻'))
+    : authFormView();
+  const rows = online.leaderboard.map(r => {
+    const t = tierInfo(r.rating);
+    const me = p && r.nickname === p.nickname;
+    return h('div', { class: 'lrow' + (me ? ' me' : '') },
+      h('span', { class: 'mono b rk' }, r.rank),
+      h('span', { class: 'nm' + (me ? ' b' : '') }, r.nickname),
+      h('span', { class: 'spacer' }),
+      h('small', { class: 'b', style: { color: t.color } }, t.label),
+      h('span', { class: 'mono b rt' }, r.rating));
+  });
+  return h('div', { class: 'stack board' }, head,
+    rows.length ? h('div', { class: 'lrows' }, rows) : h('div', { class: 'empty muted' }, T('아직 순위표가 비어 있어요', 'The leaderboard is empty so far', 'ランキングはまだ空です')));
+}
+
+/** 내 랭크: 티어, 레이팅, 직전 결과, 시작 버튼 */
+function myRankView() {
   const r = S.rank;
   const t = tierInfo(r.rating);
   const stat = (label, value) => h('div', { class: 'panel tile' }, h('small', { class: 'muted' }, label), h('div', { class: 'b mono' }, value));
@@ -413,13 +483,17 @@ function rankLobby() {
       stat(T('랭크전', 'Matches', '試合数'), r.matches),
       stat(T('최고', 'Peak', '最高'), r.peak),
       stat(T('최근', 'Recent', '最近'), r.recent.length ? r.recent.slice(-5).map(d => (d >= 0 ? '+' : '') + d).join(' ') : '—')),
+    online.signedIn
+      ? h('small', { class: 'muted center' }, `${T('온라인', 'Online', 'オンライン')} · ${online.profile.nickname}` + (online.profile.rank ? ` · ${T(`전체 ${online.profile.rank}위`, `#${online.profile.rank}`, `全体${online.profile.rank}位`)}` : ''))
+      : h('button', { class: 'linkbtn', onclick: () => { lobbyBoard = true; onlineLoadLeaderboard(); render(); } },
+          T('오프라인 · 로그인하면 전체 순위에 올라가요', 'Offline · sign in to join the leaderboard', 'オフライン · ログインでランキングに参加')),
     res ? h('div', { class: 'coach lastres' },
       h('small', { class: 'muted b' }, T('지난 판 결과', 'Last match', '前回の結果')),
       h('div', { class: 'delta mono ' + (res.delta > 0 ? 'pos' : res.delta < 0 ? 'neg' : 'muted') }, (res.delta >= 0 ? '+' : '') + res.delta),
       h('small', { class: 'mono' }, `${T('칩', 'Chips', 'チップ')} ${res.netBB >= 0 ? '+' : '−'}${fmt(Math.abs(res.netBB))} BB · ${T('판단 정확도', 'Accuracy', '判断精度')} ${res.accuracy === null ? '—' : pct(res.accuracy)}`),
       res.placement ? h('small', { class: 'muted' }, T('배치고사 (변동 2배)', 'Placement match (double change)', '配置戦（変動2倍）')) : null) : null,
     h('button', { class: 'btn green full', onclick: () => holdem.startMatch() }, T('랭크전 시작 · 20핸드', 'Start ranked match · 20 hands', 'ランク戦開始 · 20ハンド')),
-    h('div', { class: 'caption' }, T(
+    res ? null : h('div', { class: 'caption' }, T(
       '100BB로 20핸드를 칩니다. 칩 손익과 판단 정확도로 점수가 바뀌고, 코치는 꺼져요. 뱅크롤에는 영향이 없어요. 티어가 오를수록 AI가 정확해집니다.',
       'You play 20 hands with 100 BB. Your rating moves with chips won and decision accuracy. No coach, and your bankroll isn\'t touched. AI opponents get sharper as you climb.',
       '100BBで20ハンドをプレイします。チップ損益と判断の正確さでレートが変動し、コーチはオフ。残高には影響しません。ティアが上がるほどAIが正確になります。')));
@@ -584,6 +658,32 @@ function lineChart(values, baseline) {
 // ================= 설정 =================
 
 let confirmingStats = false;
+let deletingAccount = false;
+let deletePassword = '';
+
+function accountSettings() {
+  if (!online.signedIn) {
+    return [h('small', { class: 'muted' }, T('홀덤 → 랭크 → 전체 순위에서 로그인할 수 있어요.', "Sign in from Hold'em → Ranked → Leaderboard.", 'ホールデム → ランク → ランキングからログインできます。'))];
+  }
+  const p = online.profile;
+  const out = [h('div', {}, T(`${p.nickname} (${p.username})으로 로그인됨`, `Signed in as ${p.nickname} (${p.username})`, `${p.nickname}（${p.username}）でログイン中`))];
+  if (deletingAccount) {
+    out.push(h('div', { class: 'row gap6 center' },
+      h('input', { id: 'del-pass', type: 'password', placeholder: T('비밀번호 확인', 'Confirm password', 'パスワード確認'), value: deletePassword,
+                   oninput: e => { deletePassword = e.target.value; } }),
+      h('button', { class: 'btn sm red', disabled: online.busy, onclick: async () => {
+        if (deletePassword && await onlineDeleteAccount(deletePassword)) { deletingAccount = false; deletePassword = ''; render(); }
+      } }, T('계정 삭제', 'Delete', '削除')),
+      h('button', { class: 'btn sm', onclick: () => { deletingAccount = false; deletePassword = ''; render(); } }, T('취소', 'Cancel', 'キャンセル'))),
+      h('small', { class: 'muted' }, T('순위표 기록과 계정이 영구히 지워져요.', 'Your account and leaderboard entry are deleted for good.', 'アカウントとランキング記録が完全に削除されます。')));
+  } else {
+    out.push(h('div', { class: 'row gap6' },
+      h('button', { class: 'btn sm', onclick: onlineSignOut }, T('로그아웃', 'Sign out', 'ログアウト')),
+      h('button', { class: 'btn sm', onclick: () => { deletingAccount = true; render(); } }, T('계정 삭제', 'Delete account', 'アカウント削除'))));
+  }
+  if (online.error) out.push(h('small', { class: 'neg' }, online.error));
+  return out;
+}
 
 function settingsView() {
   const seg = (options, current, onPick) => h('div', { class: 'seg' },
@@ -605,6 +705,7 @@ function settingsView() {
       h('label', { class: 'check' },
         h('input', { type: 'checkbox', checked: prefs.coach, onchange: e => { prefs.coach = e.target.checked; savePrefs(); } }),
         T('코치 표시 (승률 · 팟 오즈 · 추천 액션)', 'Show coach (equity · pot odds · advice)', 'コーチ表示（勝率・ポットオッズ・推奨）'))),
+    section(T('계정', 'Account', 'アカウント'), ...accountSettings()),
     section(T('데이터', 'Data', 'データ'),
       // 확인 대화상자를 띄우면 창이 포커스를 잃고 숨겨지므로, 같은 자리에서 확인한다
       h('div', { class: 'row gap6 center' },
@@ -653,10 +754,17 @@ function render() {
     h('button', { class: prefs.tab === id ? 'on' : '', onclick: () => { prefs.tab = id; savePrefs(); render(); } }, label())));
   const view = document.getElementById('view');
   const scrollTop = view.firstChild?.scrollTop || 0;
+  const focused = document.activeElement && document.activeElement.id ? document.activeElement : null;
+  const caret = focused && focused.selectionStart;
   const tab = TABS.find(t => t[0] === prefs.tab) || TABS[0];
   view.replaceChildren(tab[2]());
   if (view.firstChild && scrollTop) view.firstChild.scrollTop = scrollTop;
+  if (focused) {
+    const again = document.getElementById(focused.id);
+    if (again) { again.focus(); try { again.setSelectionRange(caret, caret); } catch { /* 선택 불가 입력 */ } }
+  }
 }
 
 applyTheme();
 render();
+onlineRefresh();

@@ -267,6 +267,7 @@ final class GameState: ObservableObject {
         }
     }
     let holdem = HoldemGame()
+    let online = OnlineAccount()
     private(set) var sessionStart: Double = 0
     private var toastTask: Task<Void, Never>?
     private let key = "casino-practice-v1"
@@ -275,6 +276,8 @@ final class GameState: ObservableObject {
         load()
         sessionStart = s.bankroll
         holdem.g = self
+        online.g = self
+        Task { await online.refresh() }
         NSApplication.shared.appearance = theme.appearance
     }
 
@@ -326,6 +329,16 @@ final class GameState: ObservableObject {
         r.peak = max(r.peak, newRating)
         r.recent.append(delta)
         if r.recent.count > 10 { r.recent.removeFirst(r.recent.count - 10) }
+        s.rank = r
+        save()
+    }
+
+    /// 로그인 중이면 서버 레이팅이 기준이다
+    func syncRank(_ p: OnlineProfile) {
+        var r = rank
+        r.rating = p.rating
+        r.peak = p.peak
+        r.matches = p.matches
         s.rank = r
         save()
     }
@@ -1707,6 +1720,7 @@ final class HoldemGame: ObservableObject {
         delta = max(-60, min(60, delta))
         let new = max(0, old + delta)
         g.applyRank(new, delta: delta)
+        if g.online.signedIn { Task { await g.online.submit(delta: delta) } }
         match!.result = RankResult(netBB: netBB, accuracy: acc, delta: delta, oldRating: old, newRating: new, placement: placement)
         let before = tierInfo(old), after = tierInfo(new)
         if after.label != before.label {
@@ -1739,11 +1753,41 @@ final class HoldemGame: ObservableObject {
 struct RankLobby: View {
     @EnvironmentObject var g: GameState
     @ObservedObject var h: HoldemGame
+    @State private var showBoard = false
 
     var body: some View {
+        VStack(spacing: 10) {
+            Picker("", selection: $showBoard) {
+                Text(T("내 랭크", "My rank", "マイランク")).tag(false)
+                Text(T("전체 순위", "Leaderboard", "ランキング")).tag(true)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            if showBoard {
+                LeaderboardView(online: g.online)
+            } else {
+                myRank
+            }
+        }
+    }
+
+    @ViewBuilder var onlineLine: some View {
+        if let p = g.online.profile, g.online.signedIn {
+            Text(T("온라인", "Online", "オンライン") + " · \(p.nickname)" + (p.rank.map { " · " + T("전체 \($0)위", "#\($0)", "全体\($0)位") } ?? ""))
+                .font(.caption).foregroundColor(.secondary)
+        } else {
+            Button { showBoard = true } label: {
+                Text(T("오프라인 · 로그인하면 전체 순위에 올라가요", "Offline · sign in to join the leaderboard", "オフライン · ログインでランキングに参加"))
+                    .font(.caption).underline()
+            }
+            .buttonStyle(.plain).foregroundColor(.secondary)
+        }
+    }
+
+    var myRank: some View {
         let r = g.rank
         let t = tierInfo(r.rating)
-        VStack(spacing: 12) {
+        return VStack(spacing: 10) {
             HStack(spacing: 14) {
                 ZStack {
                     Circle().fill(t.color.opacity(0.18))
@@ -1770,6 +1814,7 @@ struct RankLobby: View {
                 stat(T("최고", "Peak", "最高"), "\(r.peak)")
                 stat(T("최근", "Recent", "最近"), r.recent.isEmpty ? "—" : r.recent.suffix(5).map { $0 >= 0 ? "+\($0)" : "\($0)" }.joined(separator: " "))
             }
+            onlineLine
 
             if let res = h.match?.result {
                 VStack(spacing: 4) {
@@ -1795,11 +1840,13 @@ struct RankLobby: View {
             }
             .buttonStyle(.solid(Solid.green))
 
+            if h.match?.result == nil {
             Text(T("100BB로 20핸드를 칩니다. 칩 손익과 판단 정확도로 점수가 바뀌고, 코치는 꺼져요. 뱅크롤에는 영향이 없어요. 티어가 오를수록 AI가 정확해집니다.",
                    "You play 20 hands with 100 BB. Your rating moves with chips won and decision accuracy. No coach, and your bankroll isn't touched. AI opponents get sharper as you climb.",
                    "100BBで20ハンドをプレイします。チップ損益と判断の正確さでレートが変動し、コーチはオフ。残高には影響しません。ティアが上がるほどAIが正確になります。"))
                 .font(.caption2).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            }
             Spacer(minLength: 0)
         }
     }
@@ -2311,6 +2358,320 @@ struct StatsView: View {
     }
 }
 
+// MARK: - 온라인 (계정 · 순위표)
+
+enum OnlineConfig {
+    static let url = "https://vyjaipiomptfrjxtwnvb.supabase.co"
+    // 공개용(publishable) 키: 앱에 들어가도 되는 값. 데이터는 DB 함수와 권한으로 보호된다(server/schema.sql).
+    static let key = "sb_publishable_HTMiQwD-qtNqOSs4aJ6nFA_Bel7On6G"
+}
+
+struct OnlineProfile: Codable, Equatable {
+    let username: String
+    let nickname: String
+    let rating: Int
+    let peak: Int
+    let matches: Int
+    let rank: Int?
+}
+
+struct LeaderRow: Codable, Identifiable {
+    let nickname: String
+    let rating: Int
+    let peak: Int
+    let matches: Int
+    let rank: Int
+    var id: String { nickname }
+}
+
+private struct RPCReply: Decodable {
+    let error: String?
+    let token: String?
+    let profile: OnlineProfile?
+}
+
+func onlineErrorText(_ code: String) -> String {
+    switch code {
+    case "invalid_username": return T("아이디는 영문 소문자, 숫자, _ 로 3~16자예요", "Username: 3–16 lowercase letters, digits or _", "IDは英小文字・数字・_で3〜16文字です")
+    case "invalid_nickname": return T("닉네임은 2~12자, 한글·영문·숫자·_만 쓸 수 있어요", "Nickname: 2–12 letters, digits or _", "ニックネームは2〜12文字です")
+    case "invalid_password": return T("비밀번호는 6자 이상이어야 해요", "Password must be at least 6 characters", "パスワードは6文字以上です")
+    case "username_taken": return T("이미 있는 아이디예요", "That username is taken", "そのIDは使われています")
+    case "nickname_taken": return T("이미 있는 닉네임이에요", "That nickname is taken", "そのニックネームは使われています")
+    case "invalid_login": return T("아이디 또는 비밀번호가 틀렸어요", "Wrong username or password", "IDまたはパスワードが違います")
+    case "locked": return T("비밀번호를 너무 많이 틀렸어요. 10분 뒤에 다시 해 주세요", "Too many attempts. Try again in 10 minutes", "失敗が多すぎます。10分後にお試しください")
+    case "session_expired": return T("로그인이 만료됐어요. 다시 로그인해 주세요", "Your session expired. Please sign in again", "ログインの有効期限が切れました")
+    case "too_soon": return T("결과를 너무 빨리 보내서 이번 판은 온라인에 반영되지 않았어요", "Sent too quickly, so this match wasn't counted online", "送信が早すぎたため、今回はオンラインに反映されません")
+    case "daily_limit": return T("오늘 온라인 랭크전 한도(40판)를 채웠어요", "You've hit today's online limit of 40 matches", "本日のオンライン上限（40試合）に達しました")
+    case "network": return T("서버에 연결할 수 없어요", "Can't reach the server", "サーバーに接続できません")
+    default: return T("오류가 났어요", "Something went wrong", "エラーが発生しました") + " (\(code))"
+    }
+}
+
+@MainActor
+final class OnlineAccount: ObservableObject {
+    weak var g: GameState?
+    @Published private(set) var profile: OnlineProfile?
+    @Published var leaderboard: [LeaderRow] = []
+    @Published var busy = false
+    @Published var error = ""
+    private var token: String?
+
+    init() {
+        token = UserDefaults.standard.string(forKey: "kasino-session")
+        if let d = UserDefaults.standard.data(forKey: "kasino-profile") {
+            profile = try? JSONDecoder().decode(OnlineProfile.self, from: d)
+        }
+    }
+
+    var signedIn: Bool { token != nil && profile != nil }
+
+    private func post(_ name: String, _ params: [String: Any]) async -> Data? {
+        var req = URLRequest(url: URL(string: "\(OnlineConfig.url)/rest/v1/rpc/\(name)")!)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 15
+        req.setValue(OnlineConfig.key, forHTTPHeaderField: "apikey")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: params)
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              let http = resp as? HTTPURLResponse, http.statusCode < 300 else { return nil }
+        return data
+    }
+
+    /// 계정 관련 호출. 성공하면 true, 실패하면 error에 문구를 넣고 false
+    @discardableResult
+    private func account(_ name: String, _ params: [String: Any]) async -> Bool {
+        busy = true
+        defer { busy = false }
+        guard let data = await post(name, params),
+              let reply = try? JSONDecoder().decode(RPCReply.self, from: data) else {
+            error = onlineErrorText("network")
+            return false
+        }
+        if let e = reply.error {
+            if e == "session_expired" { clear() }
+            error = onlineErrorText(e)
+            return false
+        }
+        error = ""
+        if let t = reply.token {
+            token = t
+            UserDefaults.standard.set(t, forKey: "kasino-session")
+        }
+        if let p = reply.profile { setProfile(p) }
+        return true
+    }
+
+    private func setProfile(_ p: OnlineProfile) {
+        profile = p
+        UserDefaults.standard.set(try? JSONEncoder().encode(p), forKey: "kasino-profile")
+        g?.syncRank(p)
+    }
+
+    private func clear() {
+        token = nil
+        profile = nil
+        UserDefaults.standard.removeObject(forKey: "kasino-session")
+        UserDefaults.standard.removeObject(forKey: "kasino-profile")
+    }
+
+    func signIn(_ username: String, _ password: String) async {
+        await account("sign_in", ["p_username": username, "p_password": password])
+    }
+
+    func signUp(_ username: String, _ password: String, _ nickname: String) async {
+        await account("sign_up", ["p_username": username, "p_password": password, "p_nickname": nickname])
+    }
+
+    /// 앱 시작 시: 저장된 로그인으로 서버의 최신 레이팅을 받아온다
+    func refresh() async {
+        guard let t = token else { return }
+        await account("me", ["p_token": t])
+    }
+
+    func signOut() async {
+        if let t = token { _ = await post("sign_out", ["p_token": t]) }
+        clear()
+        error = ""
+    }
+
+    func setNickname(_ nickname: String) async -> Bool {
+        guard let t = token else { return false }
+        return await account("set_nickname", ["p_token": t, "p_nickname": nickname])
+    }
+
+    func deleteAccount(_ password: String) async -> Bool {
+        guard let t = token else { return false }
+        let ok = await account("delete_account", ["p_token": t, "p_password": password])
+        if ok { clear() }
+        return ok
+    }
+
+    /// 랭크전 결과를 서버에 반영. 거절되면 서버 값으로 되돌린다
+    func submit(delta: Int) async {
+        guard let t = token else { return }
+        if !(await account("submit_match", ["p_token": t, "p_delta": delta])) {
+            g?.show(error)
+            await refresh()
+        }
+    }
+
+    func loadLeaderboard() async {
+        guard let data = await post("leaderboard", ["p_limit": 50]),
+              let rows = try? JSONDecoder().decode([LeaderRow].self, from: data) else {
+            error = onlineErrorText("network")
+            return
+        }
+        leaderboard = rows
+    }
+}
+
+/// 로그인 / 가입 폼
+struct AuthForm: View {
+    @ObservedObject var online: OnlineAccount
+    @State private var signUp = false
+    @State private var username = ""
+    @State private var password = ""
+    @State private var nickname = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("", selection: $signUp) {
+                Text(T("로그인", "Sign in", "ログイン")).tag(false)
+                Text(T("가입", "Sign up", "新規登録")).tag(true)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 180)
+
+            TextField(T("아이디", "Username", "ID"), text: $username)
+            SecureField(T("비밀번호", "Password", "パスワード"), text: $password)
+            if signUp {
+                TextField(T("닉네임 (순위표에 보여요)", "Nickname (shown on the leaderboard)", "ニックネーム（ランキングに表示）"), text: $nickname)
+            }
+            HStack {
+                Button {
+                    Task {
+                        if signUp { await online.signUp(username, password, nickname) }
+                        else { await online.signIn(username, password) }
+                        if online.signedIn { password = ""; await online.loadLeaderboard() }
+                    }
+                } label: {
+                    Text(signUp ? T("가입하기", "Create account", "登録") : T("로그인", "Sign in", "ログイン"))
+                        .bold().frame(minWidth: 90)
+                }
+                .buttonStyle(.solid(Solid.blue))
+                .disabled(online.busy || username.isEmpty || password.isEmpty || (signUp && nickname.isEmpty))
+                if online.busy { ProgressView().controlSize(.small) }
+                Spacer()
+            }
+            if !online.error.isEmpty {
+                Text(online.error).font(.caption).foregroundColor(.red)
+            }
+            Text(signUp
+                 ? T("이메일은 필요 없어요. 비밀번호를 잊으면 찾을 방법이 없으니 꼭 기억해 두세요.",
+                     "No email needed. There's no password reset, so keep it somewhere safe.",
+                     "メール不要です。パスワードの再設定はできないので忘れないでください。")
+                 : T("로그인하면 랭크전 결과가 전체 순위표에 올라가요.",
+                     "Sign in to put your ranked results on the global leaderboard.",
+                     "ログインするとランク戦の結果がランキングに載ります。"))
+                .font(.caption2).foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .textFieldStyle(.roundedBorder)
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.08)))
+    }
+}
+
+/// 전체 순위표
+struct LeaderboardView: View {
+    @EnvironmentObject var g: GameState
+    @ObservedObject var online: OnlineAccount
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if let p = online.profile, online.signedIn {
+                HStack(spacing: 8) {
+                    Text(p.nickname).font(.callout.bold())
+                    Text(tierInfo(p.rating).label).font(.caption.bold()).foregroundColor(tierInfo(p.rating).color)
+                    Spacer()
+                    Text(p.rank.map { T("전체 \($0)위", "#\($0)", "全体\($0)位") } ?? T("랭크전 기록 없음", "No ranked matches yet", "ランク戦なし"))
+                        .font(.caption.monospacedDigit()).foregroundColor(.secondary)
+                    Button { Task { await online.loadLeaderboard() } } label: { Image(systemName: "arrow.clockwise") }
+                        .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 10).frame(height: 32)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
+            } else {
+                AuthForm(online: online)
+            }
+
+            if online.leaderboard.isEmpty {
+                Text(T("아직 순위표가 비어 있어요", "The leaderboard is empty so far", "ランキングはまだ空です"))
+                    .font(.caption).foregroundColor(.secondary).frame(maxWidth: .infinity, minHeight: 60)
+            } else {
+                ScrollView {
+                    VStack(spacing: 2) {
+                        ForEach(online.leaderboard) { row in
+                            let t = tierInfo(row.rating)
+                            let me = row.nickname == online.profile?.nickname
+                            HStack(spacing: 8) {
+                                Text("\(row.rank)").font(.caption.bold().monospacedDigit()).frame(width: 26, alignment: .trailing)
+                                Text(row.nickname).font(.callout.weight(me ? .bold : .regular)).lineLimit(1)
+                                Spacer()
+                                Text(t.label).font(.caption2.bold()).foregroundColor(t.color)
+                                Text("\(row.rating)").font(.callout.weight(.semibold).monospacedDigit()).frame(width: 44, alignment: .trailing)
+                            }
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                            .background(RoundedRectangle(cornerRadius: 6).fill(me ? Color.accentColor.opacity(0.15) : Color.clear))
+                        }
+                    }
+                }
+            }
+        }
+        .task { await online.loadLeaderboard() }
+    }
+}
+
+/// 설정 탭의 계정 섹션
+struct AccountSettings: View {
+    @ObservedObject var online: OnlineAccount
+    @State private var deleting = false
+    @State private var password = ""
+
+    var body: some View {
+        if let p = online.profile, online.signedIn {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(T("\(p.nickname) (\(p.username))으로 로그인됨", "Signed in as \(p.nickname) (\(p.username))", "\(p.nickname)（\(p.username)）でログイン中"))
+                    .font(.callout)
+                if deleting {
+                    HStack {
+                        SecureField(T("비밀번호 확인", "Confirm password", "パスワード確認"), text: $password)
+                            .textFieldStyle(.roundedBorder).frame(width: 150)
+                        Button(T("계정 삭제", "Delete", "削除")) {
+                            Task { if await online.deleteAccount(password) { deleting = false; password = "" } }
+                        }
+                        .buttonStyle(.solid(Solid.red))
+                        .disabled(password.isEmpty || online.busy)
+                        Button(T("취소", "Cancel", "キャンセル")) { deleting = false; password = "" }
+                    }
+                    Text(T("순위표 기록과 계정이 영구히 지워져요.", "Your account and leaderboard entry are deleted for good.", "アカウントとランキング記録が完全に削除されます。"))
+                        .font(.caption2).foregroundColor(.secondary)
+                } else {
+                    HStack {
+                        Button(T("로그아웃", "Sign out", "ログアウト")) { Task { await online.signOut() } }
+                        Button(T("계정 삭제", "Delete account", "アカウント削除")) { deleting = true }
+                    }
+                }
+                if !online.error.isEmpty { Text(online.error).font(.caption).foregroundColor(.red) }
+            }
+        } else {
+            Text(T("홀덤 → 랭크 → 전체 순위에서 로그인할 수 있어요.", "Sign in from Hold'em → Ranked → Leaderboard.", "ホールデム → ランク → ランキングからログインできます。"))
+                .font(.caption).foregroundColor(.secondary)
+        }
+    }
+}
+
 // MARK: - 설정
 
 struct SettingsView: View {
@@ -2355,6 +2716,10 @@ struct SettingsView: View {
             section(T("홀덤", "Hold'em", "ホールデム")) {
                 Toggle(T("코치 표시 (승률 · 팟 오즈 · 추천 액션)", "Show coach (equity · pot odds · advice)", "コーチ表示（勝率・ポットオッズ・推奨）"),
                        isOn: $g.showCoach)
+            }
+
+            section(T("계정", "Account", "アカウント")) {
+                AccountSettings(online: g.online)
             }
 
             section(T("데이터", "Data", "データ")) {
