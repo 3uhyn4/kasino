@@ -95,8 +95,7 @@ const accuracy = s => (s.decisions > 0 ? s.goodDecisions / s.decisions : null);
 
 const SAVE_KEY = 'kasino-v1';
 const S = Object.assign(
-  { bankroll: 1e6, startBankroll: 1e6, stats: {}, curve: [1e6], bacHistory: [], dtHistory: [],
-    rank: { rating: 1000, matches: 0, peak: 1000, recent: [] } },
+  { bankroll: 1e6, startBankroll: 1e6, stats: {}, curve: [1e6], bacHistory: [], dtHistory: [] },
   safeParse(localStorage.getItem(SAVE_KEY))
 );
 function save() { localStorage.setItem(SAVE_KEY, JSON.stringify(S)); }
@@ -104,14 +103,36 @@ function save() { localStorage.setItem(SAVE_KEY, JSON.stringify(S)); }
 let sessionStart = S.bankroll;
 let bet = Math.max(1, Math.round(S.startBankroll / 100));
 let allIn = false;
+/** 랭크 모드: 서버 계정의 칩으로 하고 전체 순위에 반영된다 */
+let ranked = localStorage.getItem('kasino-ranked') === '1';
+// 랭크 잔액 = 서버가 확인한 잔액 − 진행 중인 판에 건 돈 + 서버 확인을 기다리는 결과
+// (서버 응답이 진행 중인 판의 차감분을 덮어쓰지 않도록 나눠서 관리한다)
+let rankServer = 0;
+let openStake = 0;
+const queuedNets = new Map();
+let nextRoundId = 1;
+const rankBalance = () => rankServer - openStake + [...queuedNets.values()].reduce((a, n) => a + n, 0);
+/** 베팅했지만 아직 정산 전인 판 수 (이 동안은 모드 전환 금지) */
+let inFlight = 0;
+const money = () => (ranked ? rankBalance() : S.bankroll);
 
 const stats = g => S.stats[g] || newStats();
 /** 올인 모드면 베팅하는 순간의 전 재산 */
-const effectiveBet = () => (allIn ? S.bankroll : bet);
+const effectiveBet = () => (allIn ? money() : bet);
 function setBet(v) { allIn = false; bet = Math.max(1, Math.round(v)); render(); }
 
 /** 금액을 차감한다. 잔액이 부족하면 false */
 function spend(amount) {
+  if (ranked) {
+    if (!online.signedIn) { toast(T('랭크 모드는 로그인이 필요해요', 'Ranked mode needs an account', 'ランクモードはログインが必要です')); return false; }
+    if (rankBalance() < amount || amount <= 0) {
+      toast(T('칩이 부족해요 — 베팅을 줄이거나 순위 탭에서 파산 지원을 받으세요', 'Not enough chips — lower your bet or claim relief in the Ranking tab', 'チップ不足 — 賭け金を下げるか、ランキングタブで救済を受けてください'));
+      return false;
+    }
+    openStake += amount;
+    inFlight++;
+    return true;
+  }
   if (S.bankroll < amount || amount <= 0) {
     toast(T('잔액이 부족해요 — 베팅을 줄이거나 설정에서 뱅크롤을 리셋하세요',
             'Insufficient bankroll — lower your bet or reset it in Settings',
@@ -119,11 +140,44 @@ function spend(amount) {
     return false;
   }
   S.bankroll -= amount;
+  inFlight++;
   return true;
+}
+
+/** 홀덤처럼 판 중간에 칩을 넣을 때: 가진 만큼만 빼고 실제로 뺀 금액을 돌려준다 */
+function debit(amount) {
+  const a = Math.min(amount, money());
+  if (ranked) openStake += a; else S.bankroll -= a;
+  return a;
+}
+
+function syncBalance(b) {
+  // 처음 칩을 받았을 때(가입·로그인) 기본 베팅을 잔액의 1%로
+  if (ranked && rankServer === 0 && b > 0) { allIn = false; bet = Math.max(1, Math.round(b / 100)); }
+  rankServer = b;
+}
+
+const canSwitchMode = () => inFlight === 0 && !holdem.inHand;
+function setRanked(v) {
+  if (!canSwitchMode() || ranked === v) return;
+  ranked = v;
+  localStorage.setItem('kasino-ranked', v ? '1' : '0');
+  allIn = false;
+  bet = Math.max(1, Math.round(money() / 100));
+  if (v) onlineRefresh();
+  render();
 }
 
 /** 총 반환금(원금 포함)을 지급하고 기록한다. 순손익을 돌려준다 */
 function settle(game, b, payout, expectedLoss) {
+  inFlight = Math.max(0, inFlight - 1);
+  if (ranked) {
+    openStake = Math.max(0, openStake - b);
+    const id = nextRoundId++;
+    queuedNets.set(id, payout - b);
+    onlineSubmitRound(id, game, b, payout);
+    return payout - b;
+  }
   S.bankroll += payout;
   const net = payout - b;
   const st = stats(game);
@@ -151,42 +205,8 @@ function settle(game, b, payout, expectedLoss) {
   return net;
 }
 
-// ---------- 랭크 (홀덤)
-
-const TIER_FLOORS = [0, 800, 1000, 1200, 1400, 1600, 1800, 2000];
-const TIER_COLORS = ['#737379', '#9e663d', '#8c99a8', '#d9a31a', '#299e94', '#407af2', '#944ddb', '#db3342'];
-function tierNames() {
-  return [T('아이언', 'Iron', 'アイアン'), T('브론즈', 'Bronze', 'ブロンズ'), T('실버', 'Silver', 'シルバー'),
-          T('골드', 'Gold', 'ゴールド'), T('플래티넘', 'Platinum', 'プラチナ'), T('다이아', 'Diamond', 'ダイヤ'),
-          T('마스터', 'Master', 'マスター'), T('그랜드마스터', 'Grandmaster', 'グランドマスター')];
-}
-/** 아이언~다이아는 IV~I 네 단계(각 50점), 마스터·그랜드마스터는 단계 없음 */
-function tierInfo(r) {
-  let idx = 0;
-  TIER_FLOORS.forEach((f, i) => { if (f <= r) idx = i; });
-  const name = tierNames()[idx];
-  if (idx <= 5) {
-    const lo = idx === 0 ? 600 : TIER_FLOORS[idx];
-    const span = (TIER_FLOORS[idx + 1] - lo) / 4;
-    const d = r < lo ? 0 : Math.min(3, Math.floor((r - lo) / span));
-    const divLo = lo + d * span;
-    return { index: idx, label: `${name} ${['IV', 'III', 'II', 'I'][d]}`, color: TIER_COLORS[idx],
-             progress: r < lo ? 0 : Math.min(1, (r - divLo) / span), next: divLo + span };
-  }
-  if (idx === 6) return { index: 6, label: name, color: TIER_COLORS[6], progress: Math.min(1, (r - 1800) / 200), next: 2000 };
-  return { index: 7, label: name, color: TIER_COLORS[7], progress: 1, next: null };
-}
-function applyRank(newRating, delta) {
-  const r = S.rank;
-  r.rating = newRating;
-  r.matches++;
-  r.peak = Math.max(r.peak, newRating);
-  r.recent.push(delta);
-  if (r.recent.length > 10) r.recent.splice(0, r.recent.length - 10);
-  save();
-}
-
 function recordDecision(good) {
+  if (ranked) return; // 통계는 연습 모드 기록
   const st = stats('holdem');
   st.decisions++;
   if (good) st.goodDecisions++;

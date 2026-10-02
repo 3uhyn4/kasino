@@ -145,7 +145,6 @@ struct SaveData: Codable {
     var stats: [String: GameStats] = [:]
     var curve: [Double] = [1_000_000]     // 뱅크롤 변화 기록
     var bacHistory: [BacResult] = []
-    var rank: RankData? = nil            // 옵셔널: 기존 저장 파일과 호환
     var dtHistory: [BacResult]? = nil    // 옵셔널: 기존 저장 파일과 호환
 }
 
@@ -168,78 +167,6 @@ enum Theme: String, CaseIterable, Identifiable {
         case .dark: return NSAppearance(named: .darkAqua)
         }
     }
-}
-
-// MARK: - 랭크
-
-struct RankData: Codable {
-    var rating = 1000
-    var matches = 0
-    var peak = 1000
-    var recent: [Int] = []       // 최근 레이팅 변화 (최대 10개)
-}
-
-/// 랭크전 한 판(20핸드) 진행 상황
-struct RankMatch {
-    static let bb = 1000.0
-    static let hands = 20
-    static let startStack = 100 * bb
-    var hand = 0
-    var stack = startStack
-    var net = 0.0
-    var decisions = 0
-    var good = 0
-    let difficulty: Double       // 0 = 실수 많은 AI, 1 = 정확한 AI
-    var result: RankResult? = nil
-}
-
-struct RankResult {
-    let netBB: Double
-    let accuracy: Double?
-    let delta: Int
-    let oldRating: Int
-    let newRating: Int
-    let placement: Bool
-}
-
-let tierFloors = [0, 800, 1000, 1200, 1400, 1600, 1800, 2000]
-let tierColors: [Color] = [
-    Color(red: 0.45, green: 0.45, blue: 0.48), Color(red: 0.62, green: 0.40, blue: 0.24),
-    Color(red: 0.55, green: 0.60, blue: 0.66), Color(red: 0.85, green: 0.64, blue: 0.10),
-    Color(red: 0.16, green: 0.62, blue: 0.58), Color(red: 0.25, green: 0.48, blue: 0.95),
-    Color(red: 0.58, green: 0.30, blue: 0.86), Color(red: 0.86, green: 0.20, blue: 0.26),
-]
-var tierNames: [String] {
-    [T("아이언", "Iron", "アイアン"), T("브론즈", "Bronze", "ブロンズ"), T("실버", "Silver", "シルバー"),
-     T("골드", "Gold", "ゴールド"), T("플래티넘", "Platinum", "プラチナ"), T("다이아", "Diamond", "ダイヤ"),
-     T("마스터", "Master", "マスター"), T("그랜드마스터", "Grandmaster", "グランドマスター")]
-}
-
-struct TierInfo {
-    let index: Int
-    let label: String        // 예: 골드 II
-    let color: Color
-    let progress: Double     // 다음 단계까지 진행도 0...1
-    let next: Int?           // 다음 단계 시작 점수
-}
-
-/// 아이언~다이아는 IV~I 네 단계(각 50점), 마스터·그랜드마스터는 단계 없음
-func tierInfo(_ r: Int) -> TierInfo {
-    let idx = tierFloors.lastIndex { $0 <= r } ?? 0
-    let name = tierNames[idx]
-    if idx <= 5 {
-        let lo = idx == 0 ? 600 : tierFloors[idx]
-        let span = (tierFloors[idx + 1] - lo) / 4
-        let d = r < lo ? 0 : min(3, (r - lo) / span)
-        let divLo = lo + d * span
-        let progress = r < lo ? 0 : min(1, Double(r - divLo) / Double(span))
-        return TierInfo(index: idx, label: name + " " + ["IV", "III", "II", "I"][d], color: tierColors[idx],
-                        progress: progress, next: divLo + span)
-    }
-    if idx == 6 {
-        return TierInfo(index: 6, label: name, color: tierColors[6], progress: min(1, Double(r - 1800) / 200), next: 2000)
-    }
-    return TierInfo(index: 7, label: name, color: tierColors[7], progress: 1, next: nil)
 }
 
 // MARK: - 상태
@@ -268,6 +195,23 @@ final class GameState: ObservableObject {
     }
     let holdem = HoldemGame()
     let online = OnlineAccount()
+    /// 랭크 모드: 서버 계정의 칩으로 하고 전체 순위에 반영된다
+    @Published var ranked: Bool = UserDefaults.standard.bool(forKey: "kasino-ranked") {
+        didSet {
+            UserDefaults.standard.set(ranked, forKey: "kasino-ranked")
+            allIn = false
+            bet = max(1, (money / 100).rounded())
+        }
+    }
+    // 랭크 잔액 = 서버가 확인한 잔액 − 진행 중인 판에 건 돈 + 서버 확인을 기다리는 결과
+    // (서버 응답이 진행 중인 판의 차감분을 덮어쓰지 않도록 나눠서 관리한다)
+    @Published private(set) var rankServer: Double = 0
+    @Published private(set) var openStake: Double = 0
+    @Published private(set) var queuedNets: [Int: Double] = [:]
+    private var nextRoundId = 1
+    var rankBalance: Double { rankServer - openStake + queuedNets.values.reduce(0, +) }
+    /// 베팅했지만 아직 정산 전인 판 수 (이 동안은 모드 전환 금지)
+    @Published var inFlight = 0
     private(set) var sessionStart: Double = 0
     private var toastTask: Task<Void, Never>?
     private let key = "casino-practice-v1"
@@ -277,18 +221,21 @@ final class GameState: ObservableObject {
         sessionStart = s.bankroll
         holdem.g = self
         online.g = self
-        Task { await online.refresh() }
+        rankServer = online.profile?.balance ?? 0
+        if ranked { bet = max(1, (rankBalance / 100).rounded()) }
         NSApplication.shared.appearance = theme.appearance
+        Task { await online.refresh() }
     }
 
-    var money: Double { s.bankroll }
+    var money: Double { ranked ? rankBalance : s.bankroll }
+    var canSwitchMode: Bool { inFlight == 0 && !holdem.inHand }
     var sessionNet: Double { s.bankroll - sessionStart }
     var totalNet: Double { s.bankroll - s.startBankroll }
     func stats(_ game: Game) -> GameStats { s.stats[game.rawValue] ?? GameStats() }
 
     // 베팅
     func setBet(_ v: Double) { allIn = false; bet = max(1, v.rounded()) }
-    var effectiveBet: Double { allIn ? s.bankroll : bet }
+    var effectiveBet: Double { allIn ? money : bet }
 
     func placeBet() -> Double? {
         let b = effectiveBet
@@ -297,6 +244,21 @@ final class GameState: ObservableObject {
 
     /// 금액을 차감한다. 잔액이 부족하면 false
     func spend(_ amount: Double) -> Bool {
+        if ranked {
+            guard online.signedIn else {
+                show(T("랭크 모드는 로그인이 필요해요", "Ranked mode needs an account", "ランクモードはログインが必要です"))
+                return false
+            }
+            guard rankBalance >= amount, amount > 0 else {
+                show(T("칩이 부족해요 — 베팅을 줄이거나 순위 탭에서 파산 지원을 받으세요",
+                       "Not enough chips — lower your bet or claim relief in the Ranking tab",
+                       "チップ不足 — 賭け金を下げるか、ランキングタブで救済を受けてください"))
+                return false
+            }
+            openStake += amount
+            inFlight += 1
+            return true
+        }
         guard s.bankroll >= amount, amount > 0 else {
             show(T("잔액이 부족해요 — 베팅을 줄이거나 설정에서 뱅크롤을 리셋하세요",
                    "Insufficient bankroll — lower your bet or reset it in Settings",
@@ -304,12 +266,44 @@ final class GameState: ObservableObject {
             return false
         }
         s.bankroll -= amount
+        inFlight += 1
         return true
+    }
+
+    /// 홀덤처럼 판 중간에 칩을 넣을 때: 가진 만큼만 빼고 실제로 뺀 금액을 돌려준다
+    func debit(_ amount: Double) -> Double {
+        let a = min(amount, money)
+        if ranked { openStake += a } else { s.bankroll -= a }
+        return a
+    }
+
+    func syncBalance(_ b: Double) {
+        // 처음 칩을 받았을 때(가입·로그인) 기본 베팅을 잔액의 1%로
+        if ranked && rankServer == 0 && b > 0 { allIn = false; bet = max(1, (b / 100).rounded()) }
+        rankServer = b
+    }
+
+    /// 서버가 이 판을 반영했거나(성공) 버렸을 때(실패)
+    func roundAcknowledged(_ id: Int) { queuedNets[id] = nil }
+
+    /// 로그아웃 등으로 계정이 바뀔 때
+    func resetRankLedger() {
+        queuedNets = [:]
+        openStake = 0
     }
 
     /// 총 반환금(원금 포함)을 지급하고 기록한다. 순손익을 돌려준다
     @discardableResult
     func settle(_ game: Game, bet b: Double, payout: Double, expectedLoss: Double) -> Double {
+        inFlight = max(0, inFlight - 1)
+        if ranked {
+            openStake = max(0, openStake - b)
+            let id = nextRoundId
+            nextRoundId += 1
+            queuedNets[id] = payout - b
+            online.submitRound(id: id, game, bet: b, payout: payout)
+            return payout - b
+        }
         s.bankroll += payout
         let net = payout - b
         var st = stats(game)
@@ -321,29 +315,8 @@ final class GameState: ObservableObject {
         return net
     }
 
-    var rank: RankData { s.rank ?? RankData() }
-    func applyRank(_ newRating: Int, delta: Int) {
-        var r = rank
-        r.rating = newRating
-        r.matches += 1
-        r.peak = max(r.peak, newRating)
-        r.recent.append(delta)
-        if r.recent.count > 10 { r.recent.removeFirst(r.recent.count - 10) }
-        s.rank = r
-        save()
-    }
-
-    /// 로그인 중이면 서버 레이팅이 기준이다
-    func syncRank(_ p: OnlineProfile) {
-        var r = rank
-        r.rating = p.rating
-        r.peak = p.peak
-        r.matches = p.matches
-        s.rank = r
-        save()
-    }
-
     func recordDecision(good: Bool) {
+        guard !ranked else { return }   // 통계는 연습 모드 기록
         var st = stats(.holdem)
         st.decisions += 1
         if good { st.goodDecisions += 1 }
@@ -1375,9 +1348,6 @@ final class HoldemGame: ObservableObject {
     @Published var bb: Double = 0
     @Published var coachEquity: Double? = nil
     @Published var feedback = ""
-    /// 랭크 모드: 뱅크롤과 별개인 고정 칩으로 20핸드를 치고 레이팅을 매긴다
-    @Published var ranked = false
-    @Published var match: RankMatch? = nil
     var deck: [Card] = []
     var raises = 0
     var needsToAct: Set<Int> = []
@@ -1388,9 +1358,6 @@ final class HoldemGame: ObservableObject {
     var active: [Int] { seats.indices.filter { !seats[$0].folded } }
     var toCall: Double { max(0, currentBet - seats[0].roundBet) }
     var canRaise: Bool { raises < 4 }
-    /// 지금 쓸 수 있는 내 칩 (랭크전이면 랭크 칩, 아니면 뱅크롤)
-    var available: Double { ranked ? (match?.stack ?? 0) : (g?.money ?? 0) }
-    var matchActive: Bool { ranked && match != nil && match?.result == nil }
     var humanHandName: String {
         let all = seats[0].cards + board
         if all.count >= 5 { return handName(bestScore(all)) }
@@ -1411,13 +1378,8 @@ final class HoldemGame: ObservableObject {
 
     func startHand() {
         guard let g, !inHand else { return }
-        if ranked {
-            guard let m = match, m.result == nil, m.hand < RankMatch.hands, m.stack >= RankMatch.bb else { return }
-            bb = RankMatch.bb
-        } else {
-            bb = g.effectiveBet.rounded()
-        }
-        guard ranked || g.money >= bb else { g.show(T("💸 빅블라인드(\(fmt(bb)))만큼의 돈이 필요해요", "💸 You need at least the big blind (\(fmt(bb)))", "💸 ビッグブラインド(\(fmt(bb)))分のお金が必要です")); return }
+        bb = g.effectiveBet.rounded()
+        guard g.money >= bb else { g.show(T("💸 빅블라인드(\(fmt(bb)))만큼의 돈이 필요해요", "💸 You need at least the big blind (\(fmt(bb)))", "💸 ビッグブラインド(\(fmt(bb)))分のお金が必要です")); return }
         deck = Card.deck()
         board = []; street = 0; showdown = false; win = nil; winners = []; humanSettled = false
         feedback = ""; coachEquity = nil
@@ -1441,14 +1403,9 @@ final class HoldemGame: ObservableObject {
     /// 칩을 팟에 넣는다. 사람은 실제 소지금에서 차감
     func put(_ i: Int, _ amount: Double) {
         var a = amount
-        if seats[i].isHuman && ranked, match != nil {
-            a = min(a, match!.stack)
-            match!.stack -= a
-            if match!.stack <= 0 { seats[i].allIn = true }
-        } else if seats[i].isHuman, let g {
-            a = min(a, g.s.bankroll)
-            g.s.bankroll -= a
-            if g.s.bankroll <= 0 { seats[i].allIn = true }
+        if seats[i].isHuman, let g {
+            a = g.debit(a)
+            if g.money <= 0 { seats[i].allIn = true }
         }
         seats[i].roundBet += a
         seats[i].totalIn += a
@@ -1538,12 +1495,6 @@ final class HoldemGame: ObservableObject {
             good = strength >= 1.5
             why = T("승률 \(pct(eq)) — 올인하기엔 위험한 핸드", "Equity \(pct(eq)) — too risky to shove", "勝率 \(pct(eq)) — オールインは危険")
         }
-        if ranked {
-            // 랭크전에서는 결과만 기록하고 피드백은 판이 끝난 뒤 정확도로만 보여준다
-            match?.decisions += 1
-            if good { match?.good += 1 }
-            return
-        }
         g.recordDecision(good: good)
         feedback = good ? "👍 " + T("좋은 판단", "Good decision", "良い判断") + " · " + T("승률", "equity", "勝率") + " \(pct(eq))"
                         : "⚠️ " + why
@@ -1580,9 +1531,9 @@ final class HoldemGame: ObservableObject {
 
     /// 가진 돈 전부를 팟에 넣는다
     func humanAllIn() {
-        guard humanTurn, available > 0 else { return }
+        guard humanTurn, let g, g.money > 0 else { return }
         grade(3)
-        let amount = available
+        let amount = g.money
         let target = seats[0].roundBet + amount
         put(0, amount)
         seats[0].action = T("올인", "All-in", "オールイン") + " \(fmt(amount))"
@@ -1614,21 +1565,6 @@ final class HoldemGame: ObservableObject {
         let potOdds = call / (pot + call)
         let r = Double.random(in: 0..<1)
         let othersCanAct = seats.indices.contains { $0 != i && !seats[$0].folded && !seats[$0].allIn }
-
-        // 랭크전: 낮은 티어의 AI는 가끔 아무렇게나 둔다
-        if ranked, let d = match?.difficulty, Double.random(in: 0..<1) < 0.25 * (1 - d) {
-            if call == 0 {
-                seats[i].action = T("체크", "Check", "チェック")
-            } else if Bool.random() {
-                put(i, call)
-                seats[i].action = T("콜", "Call", "コール") + " \(fmt(call))"
-            } else {
-                seats[i].folded = true
-                seats[i].action = T("폴드", "Fold", "フォールド")
-            }
-            needsToAct.remove(i)
-            return
-        }
 
         if canRaise && othersCanAct &&
             ((strength > 1.6 - s.aggression * 0.4 && r < 0.55 + s.aggression * 0.4) || r < s.bluff) {
@@ -1688,45 +1624,6 @@ final class HoldemGame: ObservableObject {
     func endHand() {
         inHand = false
         humanTurn = false
-        if ranked, match != nil, match!.result == nil {
-            match!.hand += 1
-            if match!.hand >= RankMatch.hands || match!.stack < RankMatch.bb { finishMatch() }
-        }
-    }
-
-    // MARK: 랭크전
-
-    func startMatch() {
-        guard let g, !inHand else { return }
-        let rating = g.rank.rating
-        match = RankMatch(difficulty: max(0, min(1, Double(rating - 600) / 1600)))
-        board = []; winners = []; win = nil; feedback = ""
-        for i in seats.indices { seats[i].cards = []; seats[i].action = "" }
-        message = T("랭크전 시작 · 20핸드", "Ranked match · 20 hands", "ランク戦開始 · 20ハンド")
-        startHand()
-    }
-
-    /// 칩 손익과 판단 정확도로 레이팅 변화를 계산한다
-    func finishMatch() {
-        guard let g, let m = match else { return }
-        let old = g.rank.rating
-        let netBB = m.net / RankMatch.bb
-        let acc: Double? = m.decisions > 0 ? Double(m.good) / Double(m.decisions) : nil
-        let perf = max(-1, min(1, netBB / 30)) * 0.6 + ((acc ?? 0.6) - 0.6)
-        let drift = Double(old - 1000) / 400          // 레이팅이 높을수록 기대치가 높다
-        let placement = g.rank.matches < 5
-        var delta = Int((40 * perf - drift * 8).rounded())
-        if placement { delta *= 2 }
-        delta = max(-60, min(60, delta))
-        let new = max(0, old + delta)
-        g.applyRank(new, delta: delta)
-        if g.online.signedIn { Task { await g.online.submit(delta: delta) } }
-        match!.result = RankResult(netBB: netBB, accuracy: acc, delta: delta, oldRating: old, newRating: new, placement: placement)
-        let before = tierInfo(old), after = tierInfo(new)
-        if after.label != before.label {
-            g.show(new > old ? T("승급! \(after.label)", "Promoted to \(after.label)!", "昇格！\(after.label)")
-                             : T("강등: \(after.label)", "Demoted to \(after.label)", "降格：\(after.label)"))
-        }
     }
 
     @discardableResult
@@ -1734,13 +1631,6 @@ final class HoldemGame: ObservableObject {
         guard !humanSettled, let g else { return 0 }
         humanSettled = true
         let staked = seats[0].totalIn
-        if ranked, match != nil {
-            match!.stack += payout
-            let net = payout - staked
-            match!.net += net
-            win = net > 0 ? true : (net < 0 ? false : nil)
-            return net
-        }
         if staked == 0 && payout == 0 { win = nil; return 0 }
         let net = g.settle(.holdem, bet: staked, payout: payout, expectedLoss: 0)
         win = net > 0 ? true : (net < 0 ? false : nil)
@@ -1749,142 +1639,11 @@ final class HoldemGame: ObservableObject {
     }
 }
 
-/// 랭크 모드 대기 화면: 티어, 레이팅, 직전 결과, 시작 버튼
-struct RankLobby: View {
-    @EnvironmentObject var g: GameState
-    @ObservedObject var h: HoldemGame
-    @State private var showBoard = false
-
-    var body: some View {
-        VStack(spacing: 10) {
-            Picker("", selection: $showBoard) {
-                Text(T("내 랭크", "My rank", "マイランク")).tag(false)
-                Text(T("전체 순위", "Leaderboard", "ランキング")).tag(true)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            if showBoard {
-                LeaderboardView(online: g.online)
-            } else {
-                myRank
-            }
-        }
-    }
-
-    @ViewBuilder var onlineLine: some View {
-        if let p = g.online.profile, g.online.signedIn {
-            Text(T("온라인", "Online", "オンライン") + " · \(p.nickname)" + (p.rank.map { " · " + T("전체 \($0)위", "#\($0)", "全体\($0)位") } ?? ""))
-                .font(.caption).foregroundColor(.secondary)
-        } else {
-            Button { showBoard = true } label: {
-                Text(T("오프라인 · 로그인하면 전체 순위에 올라가요", "Offline · sign in to join the leaderboard", "オフライン · ログインでランキングに参加"))
-                    .font(.caption).underline()
-            }
-            .buttonStyle(.plain).foregroundColor(.secondary)
-        }
-    }
-
-    var myRank: some View {
-        let r = g.rank
-        let t = tierInfo(r.rating)
-        return VStack(spacing: 10) {
-            HStack(spacing: 14) {
-                ZStack {
-                    Circle().fill(t.color.opacity(0.18))
-                    Circle().stroke(t.color, lineWidth: 3)
-                    Text(String(tierNames[t.index].prefix(1))).font(.system(size: 30, weight: .heavy)).foregroundColor(t.color)
-                }
-                .frame(width: 72, height: 72)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(t.label).font(.title2.weight(.bold)).foregroundColor(t.color)
-                    Text("\(r.rating)").font(.title3.weight(.semibold).monospacedDigit())
-                    if let next = t.next {
-                        ProgressView(value: t.progress).tint(t.color)
-                        Text(T("다음 단계까지 \(max(0, next - r.rating))점", "\(max(0, next - r.rating)) pts to next", "次まで\(max(0, next - r.rating))点"))
-                            .font(.caption2).foregroundColor(.secondary)
-                    }
-                }
-                Spacer()
-            }
-            .padding(12)
-            .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.08)))
-
-            HStack {
-                stat(T("랭크전", "Matches", "試合数"), "\(r.matches)")
-                stat(T("최고", "Peak", "最高"), "\(r.peak)")
-                stat(T("최근", "Recent", "最近"), r.recent.isEmpty ? "—" : r.recent.suffix(5).map { $0 >= 0 ? "+\($0)" : "\($0)" }.joined(separator: " "))
-            }
-            onlineLine
-
-            if let res = h.match?.result {
-                VStack(spacing: 4) {
-                    Text(T("지난 판 결과", "Last match", "前回の結果")).font(.caption.bold()).foregroundColor(.secondary)
-                    Text((res.delta >= 0 ? "+" : "") + "\(res.delta)")
-                        .font(.title.weight(.bold).monospacedDigit())
-                        .foregroundColor(res.delta > 0 ? .green : (res.delta < 0 ? .red : .secondary))
-                    Text(T("칩", "Chips", "チップ") + " " + (res.netBB >= 0 ? "+" : "−") + fmt(abs(res.netBB)) + " BB · "
-                         + T("판단 정확도", "Accuracy", "判断精度") + " " + (res.accuracy.map(pct) ?? "—"))
-                        .font(.caption.monospacedDigit())
-                    if res.placement {
-                        Text(T("배치고사 (변동 2배)", "Placement match (double change)", "配置戦（変動2倍）")).font(.caption2).foregroundColor(.secondary)
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                .padding(10)
-                .background(RoundedRectangle(cornerRadius: 10).stroke(Color.secondary.opacity(0.25)))
-            }
-
-            Button { h.startMatch() } label: {
-                Text(T("랭크전 시작 · 20핸드", "Start ranked match · 20 hands", "ランク戦開始 · 20ハンド"))
-                    .bold().frame(maxWidth: .infinity, minHeight: 28)
-            }
-            .buttonStyle(.solid(Solid.green))
-
-            if h.match?.result == nil {
-            Text(T("100BB로 20핸드를 칩니다. 칩 손익과 판단 정확도로 점수가 바뀌고, 코치는 꺼져요. 뱅크롤에는 영향이 없어요. 티어가 오를수록 AI가 정확해집니다.",
-                   "You play 20 hands with 100 BB. Your rating moves with chips won and decision accuracy. No coach, and your bankroll isn't touched. AI opponents get sharper as you climb.",
-                   "100BBで20ハンドをプレイします。チップ損益と判断の正確さでレートが変動し、コーチはオフ。残高には影響しません。ティアが上がるほどAIが正確になります。"))
-                .font(.caption2).foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-        }
-    }
-
-    func stat(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label).font(.caption2).foregroundColor(.secondary)
-            Text(value).font(.callout.weight(.semibold).monospacedDigit()).lineLimit(1).minimumScaleFactor(0.7)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(8)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
-    }
-}
-
 struct HoldemView: View {
     @EnvironmentObject var g: GameState
     @ObservedObject var h: HoldemGame
 
     var body: some View {
-        VStack(spacing: 8) {
-            Picker("", selection: $h.ranked) {
-                Text(T("연습", "Practice", "練習")).tag(false)
-                Text(T("랭크", "Ranked", "ランク")).tag(true)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .disabled(h.inHand || h.matchActive)
-
-            if h.ranked && !h.matchActive && !h.inHand {
-                RankLobby(h: h)
-            } else {
-                table
-            }
-        }
-    }
-
-    var table: some View {
         VStack(spacing: 8) {
             HStack(spacing: 6) {
                 ForEach(1..<4, id: \.self) { aiSeat($0) }
@@ -1924,29 +1683,11 @@ struct HoldemView: View {
                 h.winners.contains(0) ? Color.yellow.opacity(0.25)
                 : (h.humanTurn ? Color.orange.opacity(0.12) : Color.secondary.opacity(0.06))))
 
-            if g.showCoach && !h.ranked { coachBar }
-            if h.ranked, let m = h.match {
-                HStack {
-                    Text(T("랭크전", "Ranked", "ランク戦") + " · " + T("핸드", "Hand", "ハンド") + " \(min(m.hand + 1, RankMatch.hands))/\(RankMatch.hands)")
-                    Spacer()
-                    Text(T("칩", "Chips", "チップ") + " \(fmt(m.stack / RankMatch.bb)) BB")
-                    Text("(" + (m.net >= 0 ? "+" : "−") + fmt(abs(m.net) / RankMatch.bb) + ")")
-                        .foregroundColor(m.net > 0 ? .green : (m.net < 0 ? .red : .secondary))
-                }
-                .font(.caption.weight(.medium).monospacedDigit())
-                .padding(.horizontal, 8)
-                .frame(height: 30)
-                .background(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.25)))
-            }
+            if g.showCoach { coachBar }
 
             ResultText(text: h.message, win: h.win)
 
-            if !h.inHand && h.ranked {
-                Button { h.startHand() } label: {
-                    Text(T("다음 핸드", "Next hand", "次のハンド")).bold().frame(maxWidth: .infinity, minHeight: 24)
-                }
-                .buttonStyle(.solid(Solid.green))
-            } else if !h.inHand {
+            if !h.inHand {
                 BetControl(label: T("빅블라인드", "Big blind", "BB"))
                 Button { h.startHand() } label: {
                     Text(T("딜", "Deal", "ディール") + " · BB \(fmt(g.effectiveBet))").bold().frame(maxWidth: .infinity, minHeight: 24)
@@ -1958,7 +1699,7 @@ struct HoldemView: View {
                         .buttonStyle(.solid(Solid.red))
                     Button { h.humanCall() } label: {
                         Text(h.toCall == 0 ? T("체크", "Check", "チェック")
-                             : (h.available <= h.toCall ? T("올인", "All-in", "オールイン") + " \(fmt(h.available))"
+                             : (g.money <= h.toCall ? T("올인", "All-in", "オールイン") + " \(fmt(g.money))"
                                                     : T("콜", "Call", "コール") + " \(fmt(h.toCall))"))
                             .frame(maxWidth: .infinity, minHeight: 24)
                     }
@@ -1969,12 +1710,12 @@ struct HoldemView: View {
                             .frame(maxWidth: .infinity, minHeight: 24)
                     }
                     .buttonStyle(.solid(Solid.orange))
-                    .disabled(!h.canRaise || h.available < h.toCall + h.betSize)
+                    .disabled(!h.canRaise || g.money < h.toCall + h.betSize)
                     Button { h.humanAllIn() } label: {
                         Text(T("올인", "All-in", "オールイン")).frame(maxWidth: .infinity, minHeight: 24)
                     }
                     .buttonStyle(.solid(Solid.purple))
-                    .disabled(h.available <= 0)
+                    .disabled(g.money <= 0)
                 }
                 .font(.callout.weight(.semibold))
             } else {
@@ -2305,8 +2046,6 @@ struct StatsView: View {
                 let hs = g.stats(.holdem)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(T("실력", "Skill", "実力")).font(.caption.bold()).foregroundColor(.secondary)
-                    row(T("홀덤 랭크", "Hold'em rank", "ホールデムランク"),
-                        g.rank.matches == 0 ? "—" : "\(tierInfo(g.rank.rating).label) · \(g.rank.rating) (\(T("최고", "peak", "最高")) \(g.rank.peak))")
                     row(T("홀덤 판단 정확도", "Hold'em decision accuracy", "ホールデム判断の正確さ"),
                         hs.accuracy.map { "\(pct($0)) (\(hs.goodDecisions)/\(hs.decisions))" } ?? "—")
                     row(T("최장 연승 / 연패", "Longest win / loss streak", "最長連勝 / 連敗"),
@@ -2358,7 +2097,7 @@ struct StatsView: View {
     }
 }
 
-// MARK: - 온라인 (계정 · 순위표)
+// MARK: - 온라인 (랭크 모드 계정 · 순위표)
 
 enum OnlineConfig {
     static let url = "https://vyjaipiomptfrjxtwnvb.supabase.co"
@@ -2369,17 +2108,17 @@ enum OnlineConfig {
 struct OnlineProfile: Codable, Equatable {
     let username: String
     let nickname: String
-    let rating: Int
-    let peak: Int
-    let matches: Int
+    let balance: Double
+    let peak: Double
+    let rounds: Int
     let rank: Int?
+    let relief: Bool
 }
 
 struct LeaderRow: Codable, Identifiable {
     let nickname: String
-    let rating: Int
-    let peak: Int
-    let matches: Int
+    let balance: Double
+    let rounds: Int
     let rank: Int
     var id: String { nickname }
 }
@@ -2400,8 +2139,9 @@ func onlineErrorText(_ code: String) -> String {
     case "invalid_login": return T("아이디 또는 비밀번호가 틀렸어요", "Wrong username or password", "IDまたはパスワードが違います")
     case "locked": return T("비밀번호를 너무 많이 틀렸어요. 10분 뒤에 다시 해 주세요", "Too many attempts. Try again in 10 minutes", "失敗が多すぎます。10分後にお試しください")
     case "session_expired": return T("로그인이 만료됐어요. 다시 로그인해 주세요", "Your session expired. Please sign in again", "ログインの有効期限が切れました")
-    case "too_soon": return T("결과를 너무 빨리 보내서 이번 판은 온라인에 반영되지 않았어요", "Sent too quickly, so this match wasn't counted online", "送信が早すぎたため、今回はオンラインに反映されません")
-    case "daily_limit": return T("오늘 온라인 랭크전 한도(40판)를 채웠어요", "You've hit today's online limit of 40 matches", "本日のオンライン上限（40試合）に達しました")
+    case "too_soon", "invalid_round", "insufficient":
+        return T("이번 판이 서버에 반영되지 않아 잔액을 서버 기준으로 맞췄어요", "This round wasn't accepted, so your chips were synced with the server", "今回の結果は反映されず、残高をサーバーに合わせました")
+    case "relief_unavailable": return T("파산 지원은 칩이 100 미만일 때 하루 한 번만 받을 수 있어요", "Relief is only available once a day when you have under 100 chips", "救済は100チップ未満のとき1日1回だけです")
     case "network": return T("서버에 연결할 수 없어요", "Can't reach the server", "サーバーに接続できません")
     default: return T("오류가 났어요", "Something went wrong", "エラーが発生しました") + " (\(code))"
     }
@@ -2415,6 +2155,11 @@ final class OnlineAccount: ObservableObject {
     @Published var busy = false
     @Published var error = ""
     private var token: String?
+    /// 마지막 서버 오류 내용 (연결은 됐지만 서버가 거절한 경우)
+    private var serverMessage = ""
+    /// 라운드 결과를 순서대로, 서버 제한(0.5초)에 걸리지 않게 보낸다
+    private var roundQueue: Task<Void, Never>?
+    private var lastRoundSent = Date.distantPast
 
     init() {
         token = UserDefaults.standard.string(forKey: "kasino-session")
@@ -2432,21 +2177,29 @@ final class OnlineAccount: ObservableObject {
         req.setValue(OnlineConfig.key, forHTTPHeaderField: "apikey")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: params)
+        serverMessage = ""
         guard let (data, resp) = try? await URLSession.shared.data(for: req),
-              let http = resp as? HTTPURLResponse, http.statusCode < 300 else { return nil }
+              let http = resp as? HTTPURLResponse else { return nil }
+        guard http.statusCode < 300 else {
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            serverMessage = (obj?["message"] as? String) ?? "HTTP \(http.statusCode)"
+            return nil
+        }
         return data
     }
 
-    /// 계정 관련 호출. 성공하면 true, 실패하면 error에 문구를 넣고 false
+    /// 서버 함수 호출. 성공하면 true, 실패하면 error에 문구를 넣고 false
     @discardableResult
-    private func account(_ name: String, _ params: [String: Any]) async -> Bool {
-        busy = true
-        defer { busy = false }
+    private func call(_ name: String, _ params: [String: Any], showBusy: Bool = true) async -> Bool {
+        if showBusy { busy = true }
+        defer { if showBusy { busy = false } }
         guard let data = await post(name, params),
               let reply = try? JSONDecoder().decode(RPCReply.self, from: data) else {
-            error = onlineErrorText("network")
+            error = serverMessage.isEmpty ? onlineErrorText("network")
+                                          : T("서버 오류", "Server error", "サーバーエラー") + ": " + serverMessage
             return false
         }
+        if let p = reply.profile { setProfile(p) }
         if let e = reply.error {
             if e == "session_expired" { clear() }
             error = onlineErrorText(e)
@@ -2457,14 +2210,13 @@ final class OnlineAccount: ObservableObject {
             token = t
             UserDefaults.standard.set(t, forKey: "kasino-session")
         }
-        if let p = reply.profile { setProfile(p) }
         return true
     }
 
     private func setProfile(_ p: OnlineProfile) {
         profile = p
         UserDefaults.standard.set(try? JSONEncoder().encode(p), forKey: "kasino-profile")
-        g?.syncRank(p)
+        g?.syncBalance(p.balance)
     }
 
     private func clear() {
@@ -2472,20 +2224,22 @@ final class OnlineAccount: ObservableObject {
         profile = nil
         UserDefaults.standard.removeObject(forKey: "kasino-session")
         UserDefaults.standard.removeObject(forKey: "kasino-profile")
+        g?.resetRankLedger()
+        g?.syncBalance(0)
     }
 
     func signIn(_ username: String, _ password: String) async {
-        await account("sign_in", ["p_username": username, "p_password": password])
+        await call("sign_in", ["p_username": username, "p_password": password])
     }
 
     func signUp(_ username: String, _ password: String, _ nickname: String) async {
-        await account("sign_up", ["p_username": username, "p_password": password, "p_nickname": nickname])
+        await call("sign_up", ["p_username": username, "p_password": password, "p_nickname": nickname])
     }
 
-    /// 앱 시작 시: 저장된 로그인으로 서버의 최신 레이팅을 받아온다
+    /// 앱 시작 시, 순위 화면을 열 때: 서버의 최신 잔액과 순위를 받아온다
     func refresh() async {
         guard let t = token else { return }
-        await account("me", ["p_token": t])
+        await call("me", ["p_token": t], showBusy: false)
     }
 
     func signOut() async {
@@ -2494,24 +2248,41 @@ final class OnlineAccount: ObservableObject {
         error = ""
     }
 
-    func setNickname(_ nickname: String) async -> Bool {
-        guard let t = token else { return false }
-        return await account("set_nickname", ["p_token": t, "p_nickname": nickname])
-    }
-
     func deleteAccount(_ password: String) async -> Bool {
         guard let t = token else { return false }
-        let ok = await account("delete_account", ["p_token": t, "p_password": password])
+        let ok = await call("delete_account", ["p_token": t, "p_password": password])
         if ok { clear() }
         return ok
     }
 
-    /// 랭크전 결과를 서버에 반영. 거절되면 서버 값으로 되돌린다
-    func submit(delta: Int) async {
+    func claimRelief() async {
         guard let t = token else { return }
-        if !(await account("submit_match", ["p_token": t, "p_delta": delta])) {
-            g?.show(error)
-            await refresh()
+        if await call("claim_relief", ["p_token": t]) {
+            g?.show(T("1,000칩을 받았어요", "You received 1,000 chips", "1,000チップを受け取りました"))
+        }
+    }
+
+    /// 한 판 결과를 서버에 보낸다. 거절되면 그 판은 버리고 서버 잔액으로 맞춘다
+    func submitRound(id: Int, _ game: Game, bet: Double, payout: Double) {
+        guard let t = token else { g?.roundAcknowledged(id); return }
+        let previous = roundQueue
+        roundQueue = Task { @MainActor in
+            await previous?.value
+            let wait = 0.55 - Date().timeIntervalSince(lastRoundSent)
+            if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
+            lastRoundSent = Date()
+            let params: [String: Any] = ["p_token": t, "p_game": game.rawValue,
+                                         "p_bet": (bet * 100).rounded() / 100, "p_payout": (payout * 100).rounded() / 100]
+            let data = await post("submit_round", params)
+            g?.roundAcknowledged(id)          // 응답의 잔액에 이 판이 들어 있거나(성공) 버려졌다(실패)
+            let reply = data.flatMap { try? JSONDecoder().decode(RPCReply.self, from: $0) }
+            if let p = reply?.profile { setProfile(p) }
+            if reply == nil || reply?.error != nil {
+                if reply?.error == "session_expired" { clear() }
+                error = onlineErrorText(reply?.error ?? "network")
+                g?.show(error)
+                if reply == nil { await refresh() }
+            }
         }
     }
 
@@ -2528,7 +2299,7 @@ final class OnlineAccount: ObservableObject {
 /// 로그인 / 가입 폼
 struct AuthForm: View {
     @ObservedObject var online: OnlineAccount
-    @State private var signUp = false
+    @State private var signUp = true
     @State private var username = ""
     @State private var password = ""
     @State private var nickname = ""
@@ -2536,8 +2307,8 @@ struct AuthForm: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Picker("", selection: $signUp) {
-                Text(T("로그인", "Sign in", "ログイン")).tag(false)
                 Text(T("가입", "Sign up", "新規登録")).tag(true)
+                Text(T("로그인", "Sign in", "ログイン")).tag(false)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -2556,7 +2327,7 @@ struct AuthForm: View {
                         if online.signedIn { password = ""; await online.loadLeaderboard() }
                     }
                 } label: {
-                    Text(signUp ? T("가입하기", "Create account", "登録") : T("로그인", "Sign in", "ログイン"))
+                    Text(signUp ? T("가입하고 1,000칩 받기", "Sign up and get 1,000 chips", "登録して1,000チップ獲得") : T("로그인", "Sign in", "ログイン"))
                         .bold().frame(minWidth: 90)
                 }
                 .buttonStyle(.solid(Solid.blue))
@@ -2565,15 +2336,11 @@ struct AuthForm: View {
                 Spacer()
             }
             if !online.error.isEmpty {
-                Text(online.error).font(.caption).foregroundColor(.red)
+                Text(online.error).font(.caption).foregroundColor(.red).fixedSize(horizontal: false, vertical: true)
             }
-            Text(signUp
-                 ? T("이메일은 필요 없어요. 비밀번호를 잊으면 찾을 방법이 없으니 꼭 기억해 두세요.",
-                     "No email needed. There's no password reset, so keep it somewhere safe.",
-                     "メール不要です。パスワードの再設定はできないので忘れないでください。")
-                 : T("로그인하면 랭크전 결과가 전체 순위표에 올라가요.",
-                     "Sign in to put your ranked results on the global leaderboard.",
-                     "ログインするとランク戦の結果がランキングに載ります。"))
+            Text(T("이메일은 필요 없어요. 비밀번호를 잊으면 찾을 방법이 없으니 꼭 기억해 두세요.",
+                   "No email needed. There's no password reset, so keep your password somewhere safe.",
+                   "メール不要です。パスワードの再設定はできないので忘れないでください。"))
                 .font(.caption2).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -2583,44 +2350,76 @@ struct AuthForm: View {
     }
 }
 
-/// 전체 순위표
-struct LeaderboardView: View {
+/// 랭크 모드에서 로그인하지 않았을 때 게임 탭 대신 보여주는 화면
+struct RankedGate: View {
+    @ObservedObject var online: OnlineAccount
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(T("랭크 모드", "Ranked mode", "ランクモード")).font(.title3.bold())
+            Text(T("가입하면 1,000칩을 받아요. 모든 게임을 이 칩으로 하고, 가진 칩이 많은 순서로 전체 순위가 매겨져요. 연습 모드 뱅크롤과는 따로예요.",
+                   "Sign up and you get 1,000 chips. Every game uses these chips, and everyone is ranked by how many they hold. Separate from your practice bankroll.",
+                   "登録すると1,000チップがもらえます。全ゲームでこのチップを使い、所持チップ数で順位が決まります。練習モードの残高とは別です。"))
+                .font(.callout).foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            AuthForm(online: online)
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+/// 랭크 모드의 순위 탭: 내 정보 + 전체 순위표
+struct RankBoardView: View {
     @EnvironmentObject var g: GameState
     @ObservedObject var online: OnlineAccount
 
     var body: some View {
         VStack(spacing: 8) {
             if let p = online.profile, online.signedIn {
-                HStack(spacing: 8) {
-                    Text(p.nickname).font(.callout.bold())
-                    Text(tierInfo(p.rating).label).font(.caption.bold()).foregroundColor(tierInfo(p.rating).color)
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(p.nickname).font(.headline)
+                        Text(T("\(p.rounds)판", "\(p.rounds) rounds", "\(p.rounds)回") + " · " + T("최고", "Peak", "最高") + " \(fmt(p.peak))")
+                            .font(.caption.monospacedDigit()).foregroundColor(.secondary)
+                    }
                     Spacer()
-                    Text(p.rank.map { T("전체 \($0)위", "#\($0)", "全体\($0)位") } ?? T("랭크전 기록 없음", "No ranked matches yet", "ランク戦なし"))
-                        .font(.caption.monospacedDigit()).foregroundColor(.secondary)
-                    Button { Task { await online.loadLeaderboard() } } label: { Image(systemName: "arrow.clockwise") }
-                        .buttonStyle(.plain)
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(p.rank.map { T("전체 \($0)위", "#\($0)", "全体\($0)位") } ?? "—").font(.headline.monospacedDigit())
+                        Text(fmt(p.balance)).font(.caption.monospacedDigit()).foregroundColor(.secondary)
+                    }
                 }
-                .padding(.horizontal, 10).frame(height: 32)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.08)))
+
+                if p.relief {
+                    Button { Task { await online.claimRelief() } } label: {
+                        Text(T("파산 지원 받기 · 1,000칩 (하루 한 번)", "Claim relief · 1,000 chips (once a day)", "救済を受け取る · 1,000チップ（1日1回）"))
+                            .bold().frame(maxWidth: .infinity, minHeight: 24)
+                    }
+                    .buttonStyle(.solid(Solid.orange))
+                }
             } else {
-                AuthForm(online: online)
+                RankedGate(online: online)
             }
 
+            HStack {
+                Text(T("전체 순위", "Leaderboard", "ランキング")).font(.caption.bold()).foregroundColor(.secondary)
+                Spacer()
+                Button { Task { await online.refresh(); await online.loadLeaderboard() } } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.plain)
+            }
             if online.leaderboard.isEmpty {
                 Text(T("아직 순위표가 비어 있어요", "The leaderboard is empty so far", "ランキングはまだ空です"))
-                    .font(.caption).foregroundColor(.secondary).frame(maxWidth: .infinity, minHeight: 60)
+                    .font(.caption).foregroundColor(.secondary).frame(maxWidth: .infinity, minHeight: 40)
             } else {
                 ScrollView {
                     VStack(spacing: 2) {
                         ForEach(online.leaderboard) { row in
-                            let t = tierInfo(row.rating)
                             let me = row.nickname == online.profile?.nickname
                             HStack(spacing: 8) {
                                 Text("\(row.rank)").font(.caption.bold().monospacedDigit()).frame(width: 26, alignment: .trailing)
                                 Text(row.nickname).font(.callout.weight(me ? .bold : .regular)).lineLimit(1)
                                 Spacer()
-                                Text(t.label).font(.caption2.bold()).foregroundColor(t.color)
-                                Text("\(row.rating)").font(.callout.weight(.semibold).monospacedDigit()).frame(width: 44, alignment: .trailing)
+                                Text(fmt(row.balance)).font(.callout.weight(.semibold).monospacedDigit())
                             }
                             .padding(.horizontal, 8).padding(.vertical, 4)
                             .background(RoundedRectangle(cornerRadius: 6).fill(me ? Color.accentColor.opacity(0.15) : Color.clear))
@@ -2629,7 +2428,7 @@ struct LeaderboardView: View {
                 }
             }
         }
-        .task { await online.loadLeaderboard() }
+        .task { await online.refresh(); await online.loadLeaderboard() }
     }
 }
 
@@ -2655,7 +2454,7 @@ struct AccountSettings: View {
                         .disabled(password.isEmpty || online.busy)
                         Button(T("취소", "Cancel", "キャンセル")) { deleting = false; password = "" }
                     }
-                    Text(T("순위표 기록과 계정이 영구히 지워져요.", "Your account and leaderboard entry are deleted for good.", "アカウントとランキング記録が完全に削除されます。"))
+                    Text(T("계정과 칩, 순위표 기록이 영구히 지워져요.", "Your account, chips and leaderboard entry are deleted for good.", "アカウント、チップ、ランキング記録が完全に削除されます。"))
                         .font(.caption2).foregroundColor(.secondary)
                 } else {
                     HStack {
@@ -2666,7 +2465,7 @@ struct AccountSettings: View {
                 if !online.error.isEmpty { Text(online.error).font(.caption).foregroundColor(.red) }
             }
         } else {
-            Text(T("홀덤 → 랭크 → 전체 순위에서 로그인할 수 있어요.", "Sign in from Hold'em → Ranked → Leaderboard.", "ホールデム → ランク → ランキングからログインできます。"))
+            Text(T("위쪽에서 랭크 모드로 바꾸면 가입하거나 로그인할 수 있어요.", "Switch to Ranked at the top to sign up or sign in.", "上でランクモードに切り替えると登録・ログインできます。"))
                 .font(.caption).foregroundColor(.secondary)
         }
     }
@@ -2689,7 +2488,7 @@ struct SettingsView: View {
                 .labelsHidden()
             }
 
-            section(T("시작 뱅크롤", "Starting bankroll", "開始残高")) {
+            section(T("연습 뱅크롤", "Practice bankroll", "練習用残高")) {
                 Picker("", selection: Binding(get: { g.s.startBankroll }, set: { g.setStartBankroll($0) })) {
                     ForEach(Array(presets.enumerated()), id: \.offset) { i, v in
                         Text([T("10만", "100K", "10万"), T("100만", "1M", "100万"),
@@ -2718,7 +2517,7 @@ struct SettingsView: View {
                        isOn: $g.showCoach)
             }
 
-            section(T("계정", "Account", "アカウント")) {
+            section(T("랭크 계정", "Ranked account", "ランクアカウント")) {
                 AccountSettings(online: g.online)
             }
 
@@ -2754,21 +2553,35 @@ struct SettingsView: View {
 
 struct ContentView: View {
     @EnvironmentObject var g: GameState
+    @ObservedObject var online: OnlineAccount
     @AppStorage("casino-practice-tab") private var tab = 0
 
     var body: some View {
         VStack(spacing: 10) {
-            HStack(alignment: .bottom) {
+            HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(T("뱅크롤", "Bankroll", "残高")).font(.caption).foregroundColor(.secondary)
-                    Text(fmt(g.money)).font(.title2.weight(.semibold).monospacedDigit())
+                    Text(g.ranked ? T("랭크 칩", "Ranked chips", "ランクチップ") : T("뱅크롤", "Bankroll", "残高"))
+                        .font(.caption).foregroundColor(.secondary)
+                    Text(g.ranked && !online.signedIn ? "—" : fmt(g.money)).font(.title2.weight(.semibold).monospacedDigit())
+                    if g.ranked {
+                        Text(online.profile.flatMap { p in p.rank.map { T("전체 \($0)위", "Rank #\($0)", "全体\($0)位") + " · " + p.nickname } }
+                             ?? T("로그인 필요", "Not signed in", "未ログイン"))
+                            .font(.caption.monospacedDigit()).foregroundColor(.secondary)
+                    } else {
+                        Text(T("이번 세션", "This session", "今回のセッション") + " " + signed(g.sessionNet))
+                            .font(.caption.monospacedDigit())
+                            .foregroundColor(g.sessionNet > 0 ? .green : (g.sessionNet < 0 ? .red : .secondary))
+                    }
                 }
                 Spacer()
-                VStack(alignment: .trailing, spacing: 0) {
-                    Text(T("이번 세션", "This session", "今回のセッション")).font(.caption).foregroundColor(.secondary)
-                    Text(signed(g.sessionNet)).font(.callout.weight(.medium).monospacedDigit())
-                        .foregroundColor(g.sessionNet > 0 ? .green : (g.sessionNet < 0 ? .red : .secondary))
+                Picker("", selection: $g.ranked) {
+                    Text(T("연습", "Practice", "練習")).tag(false)
+                    Text(T("랭크", "Ranked", "ランク")).tag(true)
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 140)
+                .disabled(!g.canSwitchMode)
             }
 
             Picker("", selection: $tab) {
@@ -2777,24 +2590,29 @@ struct ContentView: View {
                 Text(T("룰렛", "Roulette", "ルーレット")).tag(1)
                 Text(T("홀덤", "Hold'em", "ホールデム")).tag(2)
                 Text(T("슬롯", "Slots", "スロット")).tag(3)
-                Text(T("통계", "Stats", "統計")).tag(4)
+                Text(g.ranked ? T("순위", "Ranking", "順位") : T("통계", "Stats", "統計")).tag(4)
                 Image(systemName: "gearshape").tag(5)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
 
             Group {
+                if g.ranked && !online.signedIn && [0, 1, 2, 3, 6].contains(tab) {
+                    RankedGate(online: online)
+                } else {
                 switch tab {
                 case 0: BaccaratView()
                 case 1: RouletteView()
                 case 2: HoldemView(h: g.holdem)
                 case 3: SlotsView()
-                case 4: StatsView()
+                case 4:
+                    if g.ranked { RankBoardView(online: online) } else { StatsView() }
                 case 6: DragonTigerView()
                 default: SettingsView()
                 }
+                }
             }
-            .frame(height: 430, alignment: .top)
+            .frame(height: 410, alignment: .top)
 
             Text(g.toast.isEmpty ? " " : g.toast)
                 .font(.caption)
@@ -2816,7 +2634,7 @@ struct CasinoApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            ContentView().environmentObject(game)
+            ContentView(online: game.online).environmentObject(game)
         } label: {
             Text("♠︎ " + fmtShort(game.money))
         }

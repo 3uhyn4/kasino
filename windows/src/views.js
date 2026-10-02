@@ -24,11 +24,11 @@ function betControl(disabled, label) {
   return h('div', { class: 'betctl' },
     h('span', { class: 'muted' }, label || T('베팅', 'Bet', 'ベット')),
     h('b', { class: 'mono' + (allIn ? ' neg' : '') }, fmt(b)),
-    S.bankroll > 0 ? h('small', { class: 'muted mono' }, pct(b / S.bankroll)) : null,
+    money() > 0 ? h('small', { class: 'muted mono' }, pct(b / money())) : null,
     h('span', { class: 'spacer' }),
     h('button', { class: 'btn sm', disabled, onclick: () => setBet(effectiveBet() / 2) }, '½'),
     h('button', { class: 'btn sm', disabled, onclick: () => setBet(effectiveBet() * 2) }, '×2'),
-    h('button', { class: 'btn sm', disabled, onclick: () => setBet(S.bankroll / 100) }, '1%'),
+    h('button', { class: 'btn sm', disabled, onclick: () => setBet(money() / 100) }, '1%'),
     h('button', { class: 'btn sm' + (allIn ? ' on red' : ''), disabled, onclick: () => { allIn = !allIn; render(); } }, T('올인', 'All-in', 'オールイン')));
 }
 
@@ -84,7 +84,7 @@ function baccaratView() {
     h('div', { class: 'row gap2' }, cards.length ? cards.map(c => cardEl(c, true)) : [cardEl(null, true), cardEl(null, true)]));
 
   const nSides = bac.sides.size;
-  const per = allIn ? S.bankroll / (1 + nSides) : effectiveBet();
+  const per = allIn ? money() / (1 + nSides) : effectiveBet();
   const info = ['11:1', '11:1', T('최대 30:1', 'up to 30:1', '最大30:1'), T('최대 30:1', 'up to 30:1', '最大30:1')];
 
   return h('div', { class: 'stack' },
@@ -101,7 +101,7 @@ function baccaratView() {
         h('b', {}, sideNames()[i]), h('small', {}, info[i])))),
     h('div', { class: 'caption center' }, nSides === 0
       ? T('사이드 베팅 없음 (켜면 메인과 같은 금액이 걸려요)', 'No side bets (each costs the same as the main bet)', 'サイドベットなし（メインと同額が賭けられます）')
-      : `${T('사이드', 'Side', 'サイド')} ${nSides} × ${fmt(per)} · ${T('총', 'total', '合計')} ${fmt(allIn ? S.bankroll : per * (1 + nSides))}`),
+      : `${T('사이드', 'Side', 'サイド')} ${nSides} × ${fmt(per)} · ${T('총', 'total', '合計')} ${fmt(allIn ? money() : per * (1 + nSides))}`),
     h('div', { class: 'row gap6' },
       mainBetButton(T('플레이어', 'Player', 'プレイヤー'), '1:1', 'blue', bac.dealing, () => playBaccarat(0)),
       mainBetButton(T('타이', 'Tie', 'タイ'), '8:1', 'green', bac.dealing, () => playBaccarat(2)),
@@ -110,8 +110,8 @@ function baccaratView() {
 
 async function playBaccarat(side) {
   const chosen = [...bac.sides].sort();
-  const b = allIn ? S.bankroll / (1 + chosen.length) : effectiveBet();
-  const stake = allIn ? S.bankroll : b * (1 + chosen.length);
+  const b = allIn ? money() / (1 + chosen.length) : effectiveBet();
+  const stake = allIn ? money() : b * (1 + chosen.length);
   if (!spend(stake)) return;
   Object.assign(bac, { dealing: true, win: null, result: T('카드를 돌리는 중...', 'Dealing...', '配っています...'), detail: '', p: [], b: [] });
   render();
@@ -250,8 +250,8 @@ const rou = { selected: new Set(), number: null, spinning: false, result: '', de
 
 function rouletteView() {
   const n = rou.selected.size;
-  const per = n === 0 ? effectiveBet() : allIn ? S.bankroll / n : effectiveBet();
-  const total = allIn ? S.bankroll : effectiveBet() * n;
+  const per = n === 0 ? effectiveBet() : allIn ? money() / n : effectiveBet();
+  const total = allIn ? money() : effectiveBet() * n;
   const cell = (spot, text, color, cls = '') => h('button', {
     class: `rcell ${color} ${cls}` + (rou.selected.has(spot) ? ' chip' : '') + (!rou.spinning && rou.number !== null && spot === 'n:' + rou.number ? ' hit' : ''),
     disabled: rou.spinning,
@@ -290,8 +290,8 @@ function rouletteView() {
 async function spinRoulette() {
   const spots = [...rou.selected];
   if (!spots.length) return;
-  const per = allIn ? S.bankroll / spots.length : effectiveBet();
-  const stake = allIn ? S.bankroll : per * spots.length;
+  const per = allIn ? money() / spots.length : effectiveBet();
+  const stake = allIn ? money() : per * spots.length;
   if (!spend(stake)) return;
   Object.assign(rou, { spinning: true, win: null, detail: '',
     result: T(`${spots.length}곳에 ${fmt(stake)} — 휠이 돌아갑니다...`, `${fmt(stake)} on ${spots.length} spots — spinning...`, `${spots.length}か所に ${fmt(stake)} — 回転中...`) });
@@ -330,9 +330,7 @@ function holdemView() {
   };
 
   let controls;
-  if (!hd.inHand && hd.ranked) {
-    controls = [h('button', { class: 'btn green full', onclick: () => hd.startHand() }, T('다음 핸드', 'Next hand', '次のハンド'))];
-  } else if (!hd.inHand) {
+  if (!hd.inHand) {
     controls = [
       betControl(false, T('빅블라인드', 'Big blind', 'BB')),
       h('button', { class: 'btn green full', onclick: () => hd.startHand() }, `${T('딜', 'Deal', 'ディール')} · BB ${fmt(effectiveBet())}`),
@@ -342,23 +340,16 @@ function holdemView() {
       h('button', { class: 'btn red grow', onclick: () => hd.fold() }, T('폴드', 'Fold', 'フォールド')),
       h('button', { class: 'btn blue grow', onclick: () => hd.call() },
         hd.toCall === 0 ? T('체크', 'Check', 'チェック')
-          : hd.available <= hd.toCall ? `${T('올인', 'All-in', 'オールイン')} ${fmt(hd.available)}` : `${T('콜', 'Call', 'コール')} ${fmt(hd.toCall)}`),
-      h('button', { class: 'btn orange grow', disabled: !hd.canRaise || hd.available < hd.toCall + hd.betSize, onclick: () => hd.raiseHuman() },
+          : money() <= hd.toCall ? `${T('올인', 'All-in', 'オールイン')} ${fmt(money())}` : `${T('콜', 'Call', 'コール')} ${fmt(hd.toCall)}`),
+      h('button', { class: 'btn orange grow', disabled: !hd.canRaise || money() < hd.toCall + hd.betSize, onclick: () => hd.raiseHuman() },
         hd.currentBet === 0 ? `${T('벳', 'Bet', 'ベット')} ${fmt(hd.betSize)}` : `${T('레이즈', 'Raise', 'レイズ')} ${fmt(hd.currentBet + hd.betSize)}`),
-      h('button', { class: 'btn purple grow', disabled: hd.available <= 0, onclick: () => hd.shove() }, T('올인', 'All-in', 'オールイン')))];
+      h('button', { class: 'btn purple grow', disabled: money() <= 0, onclick: () => hd.shove() }, T('올인', 'All-in', 'オールイン')))];
   } else {
     controls = [h('div', { class: 'row gap6 center waiting' }, h('span', { class: 'spinner' }), h('small', { class: 'muted' }, T('상대 차례...', 'Opponents acting...', '相手の番...')))];
   }
 
   let coach = null;
-  if (hd.ranked && hd.match) {
-    const m = hd.match;
-    coach = h('div', { class: 'coach row gap6 center' },
-      h('small', { class: 'b' }, `${T('랭크전', 'Ranked', 'ランク戦')} · ${T('핸드', 'Hand', 'ハンド')} ${Math.min(m.hand + 1, RANK.hands)}/${RANK.hands}`),
-      h('span', { class: 'spacer' }),
-      h('small', { class: 'mono b' }, `${T('칩', 'Chips', 'チップ')} ${fmt(m.stack / RANK.bb)} BB`),
-      h('small', { class: 'mono ' + (m.net > 0 ? 'pos' : m.net < 0 ? 'neg' : 'muted') }, `(${m.net >= 0 ? '+' : '−'}${fmt(Math.abs(m.net) / RANK.bb)})`));
-  } else if (prefs.coach && !hd.ranked) {
+  if (prefs.coach) {
     if (hd.humanTurn && hd.coachEquity !== null) {
       const [txt, color] = hd.advice();
       coach = h('div', { class: 'coach row gap10 center' },
@@ -372,14 +363,7 @@ function holdemView() {
     }
   }
 
-  const modeSwitch = h('div', { class: 'seg mode' + (hd.inHand || hd.matchActive ? ' locked' : '') },
-    [[false, T('연습', 'Practice', '練習')], [true, T('랭크', 'Ranked', 'ランク')]].map(([v, label]) =>
-      h('button', { class: hd.ranked === v ? 'on' : '', disabled: hd.inHand || hd.matchActive, onclick: () => { hd.ranked = v; render(); } }, label)));
-
-  if (hd.ranked && !hd.matchActive && !hd.inHand) return h('div', { class: 'stack' }, modeSwitch, rankLobby());
-
   return h('div', { class: 'stack' },
-    modeSwitch,
     h('div', { class: 'row gap6' }, [1, 2, 3].map(ai)),
     h('div', { class: 'panel felt' },
       h('div', { class: 'row gap4 center' }, [0, 1, 2, 3, 4].map(i => (i < hd.board.length ? cardEl(hd.board[i], true) : h('div', { class: 'card small slot' })))),
@@ -393,110 +377,6 @@ function holdemView() {
     coach,
     resultText(hd.message || hd.intro(), hd.win),
     ...controls);
-}
-
-let lobbyBoard = false;
-const authForm = { signUp: false, username: '', password: '', nickname: '' };
-
-/** 랭크 모드 대기 화면: 내 랭크 / 전체 순위 */
-function rankLobby() {
-  const sw = h('div', { class: 'seg' },
-    [[false, T('내 랭크', 'My rank', 'マイランク')], [true, T('전체 순위', 'Leaderboard', 'ランキング')]].map(([v, label]) =>
-      h('button', { class: lobbyBoard === v ? 'on' : '', onclick: () => {
-        lobbyBoard = v;
-        if (v) onlineLoadLeaderboard();
-        render();
-      } }, label)));
-  return h('div', { class: 'stack' }, sw, lobbyBoard ? leaderboardView() : myRankView());
-}
-
-function authFormView() {
-  const f = authForm;
-  const field = (id, key, placeholder, type = 'text') => h('input', {
-    id, type, placeholder, value: f[key], autocomplete: 'off', spellcheck: 'false',
-    oninput: e => { f[key] = e.target.value; },
-    onkeydown: e => { if (e.key === 'Enter') submitAuth(); },
-  });
-  return h('div', { class: 'panel authform' },
-    h('div', { class: 'seg small' },
-      [[false, T('로그인', 'Sign in', 'ログイン')], [true, T('가입', 'Sign up', '新規登録')]].map(([v, label]) =>
-        h('button', { class: f.signUp === v ? 'on' : '', onclick: () => { f.signUp = v; online.error = ''; render(); } }, label))),
-    field('auth-user', 'username', T('아이디', 'Username', 'ID')),
-    field('auth-pass', 'password', T('비밀번호', 'Password', 'パスワード'), 'password'),
-    f.signUp ? field('auth-nick', 'nickname', T('닉네임 (순위표에 보여요)', 'Nickname (shown on the leaderboard)', 'ニックネーム（ランキングに表示）')) : null,
-    h('div', { class: 'row gap6 center' },
-      h('button', { class: 'btn blue', disabled: online.busy, onclick: submitAuth },
-        f.signUp ? T('가입하기', 'Create account', '登録') : T('로그인', 'Sign in', 'ログイン')),
-      online.busy ? h('span', { class: 'spinner' }) : null),
-    online.error ? h('small', { class: 'neg' }, online.error) : null,
-    h('small', { class: 'muted' }, f.signUp
-      ? T('이메일은 필요 없어요. 비밀번호를 잊으면 찾을 방법이 없으니 꼭 기억해 두세요.', "No email needed. There's no password reset, so keep it somewhere safe.", 'メール不要です。パスワードの再設定はできないので忘れないでください。')
-      : T('로그인하면 랭크전 결과가 전체 순위표에 올라가요.', 'Sign in to put your ranked results on the global leaderboard.', 'ログインするとランク戦の結果がランキングに載ります。')));
-}
-
-async function submitAuth() {
-  const f = authForm;
-  if (!f.username || !f.password || (f.signUp && !f.nickname)) return;
-  const ok = f.signUp ? await onlineSignUp(f.username, f.password, f.nickname) : await onlineSignIn(f.username, f.password);
-  if (ok) { f.password = ''; onlineLoadLeaderboard(); }
-}
-
-function leaderboardView() {
-  const p = online.profile;
-  const head = online.signedIn
-    ? h('div', { class: 'panel row gap8 center mine' },
-        h('b', {}, p.nickname),
-        h('small', { class: 'b', style: { color: tierInfo(p.rating).color } }, tierInfo(p.rating).label),
-        h('span', { class: 'spacer' }),
-        h('small', { class: 'muted mono' }, p.rank ? T(`전체 ${p.rank}위`, `#${p.rank}`, `全体${p.rank}位`) : T('랭크전 기록 없음', 'No ranked matches yet', 'ランク戦なし')),
-        h('button', { class: 'btn xs', onclick: onlineLoadLeaderboard }, '↻'))
-    : authFormView();
-  const rows = online.leaderboard.map(r => {
-    const t = tierInfo(r.rating);
-    const me = p && r.nickname === p.nickname;
-    return h('div', { class: 'lrow' + (me ? ' me' : '') },
-      h('span', { class: 'mono b rk' }, r.rank),
-      h('span', { class: 'nm' + (me ? ' b' : '') }, r.nickname),
-      h('span', { class: 'spacer' }),
-      h('small', { class: 'b', style: { color: t.color } }, t.label),
-      h('span', { class: 'mono b rt' }, r.rating));
-  });
-  return h('div', { class: 'stack board' }, head,
-    rows.length ? h('div', { class: 'lrows' }, rows) : h('div', { class: 'empty muted' }, T('아직 순위표가 비어 있어요', 'The leaderboard is empty so far', 'ランキングはまだ空です')));
-}
-
-/** 내 랭크: 티어, 레이팅, 직전 결과, 시작 버튼 */
-function myRankView() {
-  const r = S.rank;
-  const t = tierInfo(r.rating);
-  const stat = (label, value) => h('div', { class: 'panel tile' }, h('small', { class: 'muted' }, label), h('div', { class: 'b mono' }, value));
-  const res = holdem.match && holdem.match.result;
-  return h('div', { class: 'stack lobby' },
-    h('div', { class: 'panel row gap14 center rankcard' },
-      h('div', { class: 'badge', style: { color: t.color, borderColor: t.color, background: t.color + '2e' } }, tierNames()[t.index][0]),
-      h('div', { class: 'grow1' },
-        h('div', { class: 'tier', style: { color: t.color } }, t.label),
-        h('div', { class: 'rating mono' }, fmt(r.rating)),
-        t.next === null ? null : h('div', { class: 'bar' }, h('i', { style: { width: (t.progress * 100) + '%', background: t.color } })),
-        t.next === null ? null : h('small', { class: 'muted' }, T(`다음 단계까지 ${Math.max(0, t.next - r.rating)}점`, `${Math.max(0, t.next - r.rating)} pts to next`, `次まで${Math.max(0, t.next - r.rating)}点`)))),
-    h('div', { class: 'row gap8' },
-      stat(T('랭크전', 'Matches', '試合数'), r.matches),
-      stat(T('최고', 'Peak', '最高'), r.peak),
-      stat(T('최근', 'Recent', '最近'), r.recent.length ? r.recent.slice(-5).map(d => (d >= 0 ? '+' : '') + d).join(' ') : '—')),
-    online.signedIn
-      ? h('small', { class: 'muted center' }, `${T('온라인', 'Online', 'オンライン')} · ${online.profile.nickname}` + (online.profile.rank ? ` · ${T(`전체 ${online.profile.rank}위`, `#${online.profile.rank}`, `全体${online.profile.rank}位`)}` : ''))
-      : h('button', { class: 'linkbtn', onclick: () => { lobbyBoard = true; onlineLoadLeaderboard(); render(); } },
-          T('오프라인 · 로그인하면 전체 순위에 올라가요', 'Offline · sign in to join the leaderboard', 'オフライン · ログインでランキングに参加')),
-    res ? h('div', { class: 'coach lastres' },
-      h('small', { class: 'muted b' }, T('지난 판 결과', 'Last match', '前回の結果')),
-      h('div', { class: 'delta mono ' + (res.delta > 0 ? 'pos' : res.delta < 0 ? 'neg' : 'muted') }, (res.delta >= 0 ? '+' : '') + res.delta),
-      h('small', { class: 'mono' }, `${T('칩', 'Chips', 'チップ')} ${res.netBB >= 0 ? '+' : '−'}${fmt(Math.abs(res.netBB))} BB · ${T('판단 정확도', 'Accuracy', '判断精度')} ${res.accuracy === null ? '—' : pct(res.accuracy)}`),
-      res.placement ? h('small', { class: 'muted' }, T('배치고사 (변동 2배)', 'Placement match (double change)', '配置戦（変動2倍）')) : null) : null,
-    h('button', { class: 'btn green full', onclick: () => holdem.startMatch() }, T('랭크전 시작 · 20핸드', 'Start ranked match · 20 hands', 'ランク戦開始 · 20ハンド')),
-    res ? null : h('div', { class: 'caption' }, T(
-      '100BB로 20핸드를 칩니다. 칩 손익과 판단 정확도로 점수가 바뀌고, 코치는 꺼져요. 뱅크롤에는 영향이 없어요. 티어가 오를수록 AI가 정확해집니다.',
-      'You play 20 hands with 100 BB. Your rating moves with chips won and decision accuracy. No coach, and your bankroll isn\'t touched. AI opponents get sharper as you climb.',
-      '100BBで20ハンドをプレイします。チップ損益と判断の正確さでレートが変動し、コーチはオフ。残高には影響しません。ティアが上がるほどAIが正確になります。')));
 }
 
 // ================= 슬롯 =================
@@ -622,7 +502,6 @@ function statsView() {
       }))),
     h('div', {},
       h('small', { class: 'muted b' }, T('실력', 'Skill', '実力')),
-      row(T('홀덤 랭크', "Hold'em rank", 'ホールデムランク'), S.rank.matches === 0 ? '—' : `${tierInfo(S.rank.rating).label} · ${fmt(S.rank.rating)} (${T('최고', 'peak', '最高')} ${fmt(S.rank.peak)})`),
       row(T('홀덤 판단 정확도', "Hold'em decision accuracy", 'ホールデム判断の正確さ'), acc === null ? '—' : `${pct(acc)} (${hs.goodDecisions}/${hs.decisions})`),
       row(T('최장 연승 / 연패', 'Longest win / loss streak', '最長連勝 / 連敗'), `${all.bestStreak} / ${-all.worstStreak}`),
       row(T('총 베팅액 / ROI', 'Total wagered / ROI', '総ベット額 / ROI'), `${fmt(all.wagered)} / ${roi(all) === null ? '—' : pct(roi(all))}`)),
@@ -655,15 +534,83 @@ function lineChart(values, baseline) {
   return cv;
 }
 
+// ================= 랭크: 로그인 · 순위 =================
+
+const authForm = { signUp: true, username: '', password: '', nickname: '' };
+
+function authFormView() {
+  const f = authForm;
+  const field = (id, key, placeholder, type = 'text') => h('input', {
+    id, type, placeholder, value: f[key], autocomplete: 'off', spellcheck: 'false',
+    oninput: e => { f[key] = e.target.value; },
+    onkeydown: e => { if (e.key === 'Enter') submitAuth(); },
+  });
+  return h('div', { class: 'panel authform' },
+    h('div', { class: 'seg small' },
+      [[true, T('가입', 'Sign up', '新規登録')], [false, T('로그인', 'Sign in', 'ログイン')]].map(([v, label]) =>
+        h('button', { class: f.signUp === v ? 'on' : '', onclick: () => { f.signUp = v; online.error = ''; render(); } }, label))),
+    field('auth-user', 'username', T('아이디', 'Username', 'ID')),
+    field('auth-pass', 'password', T('비밀번호', 'Password', 'パスワード'), 'password'),
+    f.signUp ? field('auth-nick', 'nickname', T('닉네임 (순위표에 보여요)', 'Nickname (shown on the leaderboard)', 'ニックネーム（ランキングに表示）')) : null,
+    h('div', { class: 'row gap6 center' },
+      h('button', { class: 'btn blue', disabled: online.busy, onclick: submitAuth },
+        f.signUp ? T('가입하고 1,000칩 받기', 'Sign up and get 1,000 chips', '登録して1,000チップ獲得') : T('로그인', 'Sign in', 'ログイン')),
+      online.busy ? h('span', { class: 'spinner' }) : null),
+    online.error ? h('small', { class: 'neg' }, online.error) : null,
+    h('small', { class: 'muted' }, T('이메일은 필요 없어요. 비밀번호를 잊으면 찾을 방법이 없으니 꼭 기억해 두세요.', "No email needed. There's no password reset, so keep your password somewhere safe.", 'メール不要です。パスワードの再設定はできないので忘れないでください。')));
+}
+
+async function submitAuth() {
+  const f = authForm;
+  if (!f.username || !f.password || (f.signUp && !f.nickname)) return;
+  const ok = f.signUp ? await onlineSignUp(f.username, f.password, f.nickname) : await onlineSignIn(f.username, f.password);
+  if (ok) { f.password = ''; onlineLoadLeaderboard(); }
+}
+
+/** 랭크 모드에서 로그인하지 않았을 때 게임 탭 대신 보여주는 화면 */
+function rankedGate() {
+  return h('div', { class: 'stack' },
+    h('div', { class: 'gate-title' }, T('랭크 모드', 'Ranked mode', 'ランクモード')),
+    h('div', { class: 'muted' }, T('가입하면 1,000칩을 받아요. 모든 게임을 이 칩으로 하고, 가진 칩이 많은 순서로 전체 순위가 매겨져요. 연습 모드 뱅크롤과는 따로예요.',
+      'Sign up and you get 1,000 chips. Every game uses these chips, and everyone is ranked by how many they hold. Separate from your practice bankroll.',
+      '登録すると1,000チップがもらえます。全ゲームでこのチップを使い、所持チップ数で順位が決まります。練習モードの残高とは別です。')),
+    authFormView());
+}
+
+/** 랭크 모드의 순위 탭: 내 정보 + 전체 순위표 */
+function rankBoardView() {
+  const p = online.profile;
+  const top = online.signedIn
+    ? [h('div', { class: 'panel row center mine' },
+         h('div', {}, h('b', {}, p.nickname), h('br'),
+           h('small', { class: 'muted mono' }, `${T(`${p.rounds}판`, `${p.rounds} rounds`, `${p.rounds}回`)} · ${T('최고', 'Peak', '最高')} ${fmt(Number(p.peak))}`)),
+         h('span', { class: 'spacer' }),
+         h('div', { class: 'right' }, h('b', { class: 'mono' }, p.rank ? T(`전체 ${p.rank}위`, `#${p.rank}`, `全体${p.rank}位`) : '—'), h('br'),
+           h('small', { class: 'muted mono' }, fmt(Number(p.balance))))),
+       p.relief ? h('button', { class: 'btn orange full', onclick: onlineClaimRelief }, T('파산 지원 받기 · 1,000칩 (하루 한 번)', 'Claim relief · 1,000 chips (once a day)', '救済を受け取る · 1,000チップ（1日1回）')) : null]
+    : [rankedGate()];
+  const rows = online.leaderboard.map(r => {
+    const me = p && r.nickname === p.nickname;
+    return h('div', { class: 'lrow' + (me ? ' me' : '') },
+      h('span', { class: 'mono b rk' }, r.rank),
+      h('span', { class: 'nm' + (me ? ' b' : '') }, r.nickname),
+      h('span', { class: 'spacer' }),
+      h('span', { class: 'mono b' }, fmt(Number(r.balance))));
+  });
+  return h('div', { class: 'stack board' }, ...top,
+    h('div', { class: 'row center' }, h('small', { class: 'muted b' }, T('전체 순위', 'Leaderboard', 'ランキング')), h('span', { class: 'spacer' }),
+      h('button', { class: 'btn xs', onclick: async () => { await onlineRefresh(); onlineLoadLeaderboard(); } }, '↻')),
+    rows.length ? h('div', { class: 'lrows' }, rows) : h('div', { class: 'empty muted' }, T('아직 순위표가 비어 있어요', 'The leaderboard is empty so far', 'ランキングはまだ空です')));
+}
+
 // ================= 설정 =================
 
-let confirmingStats = false;
 let deletingAccount = false;
 let deletePassword = '';
 
 function accountSettings() {
   if (!online.signedIn) {
-    return [h('small', { class: 'muted' }, T('홀덤 → 랭크 → 전체 순위에서 로그인할 수 있어요.', "Sign in from Hold'em → Ranked → Leaderboard.", 'ホールデム → ランク → ランキングからログインできます。'))];
+    return [h('small', { class: 'muted' }, T('위쪽에서 랭크 모드로 바꾸면 가입하거나 로그인할 수 있어요.', 'Switch to Ranked at the top to sign up or sign in.', '上でランクモードに切り替えると登録・ログインできます。'))];
   }
   const p = online.profile;
   const out = [h('div', {}, T(`${p.nickname} (${p.username})으로 로그인됨`, `Signed in as ${p.nickname} (${p.username})`, `${p.nickname}（${p.username}）でログイン中`))];
@@ -675,7 +622,7 @@ function accountSettings() {
         if (deletePassword && await onlineDeleteAccount(deletePassword)) { deletingAccount = false; deletePassword = ''; render(); }
       } }, T('계정 삭제', 'Delete', '削除')),
       h('button', { class: 'btn sm', onclick: () => { deletingAccount = false; deletePassword = ''; render(); } }, T('취소', 'Cancel', 'キャンセル'))),
-      h('small', { class: 'muted' }, T('순위표 기록과 계정이 영구히 지워져요.', 'Your account and leaderboard entry are deleted for good.', 'アカウントとランキング記録が完全に削除されます。')));
+      h('small', { class: 'muted' }, T('계정과 칩, 순위표 기록이 영구히 지워져요.', 'Your account, chips and leaderboard entry are deleted for good.', 'アカウント、チップ、ランキング記録が完全に削除されます。')));
   } else {
     out.push(h('div', { class: 'row gap6' },
       h('button', { class: 'btn sm', onclick: onlineSignOut }, T('로그아웃', 'Sign out', 'ログアウト')),
@@ -684,6 +631,8 @@ function accountSettings() {
   if (online.error) out.push(h('small', { class: 'neg' }, online.error));
   return out;
 }
+
+let confirmingStats = false;
 
 function settingsView() {
   const seg = (options, current, onPick) => h('div', { class: 'seg' },
@@ -694,7 +643,7 @@ function settingsView() {
   return h('div', { class: 'stack settings' },
     section(T('언어', 'Language', '言語'),
       seg([['ko', '한국어'], ['en', 'English'], ['ja', '日本語']], prefs.lang, v => { prefs.lang = v; savePrefs(); render(); })),
-    section(T('시작 뱅크롤', 'Starting bankroll', '開始残高'),
+    section(T('연습 뱅크롤', 'Practice bankroll', '練習用残高'),
       seg(presets, S.startBankroll, v => { S.startBankroll = v; resetBankroll(); render(); }),
       h('small', { class: 'muted' }, T('실제로 카지노에 가져갈 금액으로 맞추면 연습 효과가 좋아요.', "Match what you'd actually bring to the casino for realistic practice.", '実際にカジノへ持って行く金額に合わせると効果的です。')),
       h('div', {}, h('button', { class: 'btn sm', onclick: () => { resetBankroll(); render(); } }, T('뱅크롤 리셋', 'Reset bankroll', '残高をリセット')))),
@@ -705,7 +654,7 @@ function settingsView() {
       h('label', { class: 'check' },
         h('input', { type: 'checkbox', checked: prefs.coach, onchange: e => { prefs.coach = e.target.checked; savePrefs(); } }),
         T('코치 표시 (승률 · 팟 오즈 · 추천 액션)', 'Show coach (equity · pot odds · advice)', 'コーチ表示（勝率・ポットオッズ・推奨）'))),
-    section(T('계정', 'Account', 'アカウント'), ...accountSettings()),
+    section(T('랭크 계정', 'Ranked account', 'ランクアカウント'), ...accountSettings()),
     section(T('데이터', 'Data', 'データ'),
       // 확인 대화상자를 띄우면 창이 포커스를 잃고 숨겨지므로, 같은 자리에서 확인한다
       h('div', { class: 'row gap6 center' },
@@ -727,7 +676,7 @@ const TABS = [
   ['roulette', () => T('룰렛', 'Roulette', 'ルーレット'), rouletteView],
   ['holdem', () => T('홀덤', "Hold'em", 'ホールデム'), holdemView],
   ['slots', () => T('슬롯', 'Slots', 'スロット'), slotsView],
-  ['stats', () => T('통계', 'Stats', '統計'), statsView],
+  ['stats', () => (ranked ? T('순위', 'Ranking', '順位') : T('통계', 'Stats', '統計')), () => (ranked ? rankBoardView() : statsView())],
   ['settings', () => '⚙︎', settingsView],
 ];
 
@@ -737,14 +686,21 @@ function applyTheme() {
 
 function renderHeader() {
   const net = S.bankroll - sessionStart;
-  document.getElementById('bankroll-label').textContent = T('뱅크롤', 'Bankroll', '残高');
-  document.getElementById('bankroll').textContent = fmt(S.bankroll);
-  document.getElementById('session-label').textContent = T('이번 세션', 'This session', '今回のセッション');
+  document.getElementById('bankroll-label').textContent = ranked ? T('랭크 칩', 'Ranked chips', 'ランクチップ') : T('뱅크롤', 'Bankroll', '残高');
+  document.getElementById('bankroll').textContent = ranked && !online.signedIn ? '—' : fmt(money());
   const sn = document.getElementById('session');
-  sn.textContent = signed(net);
-  sn.className = 'mono ' + (net > 0 ? 'pos' : net < 0 ? 'neg' : 'muted');
+  if (ranked) {
+    const p = online.profile;
+    sn.textContent = online.signedIn && p.rank ? `${T(`전체 ${p.rank}위`, `Rank #${p.rank}`, `全体${p.rank}位`)} · ${p.nickname}` : T('로그인 필요', 'Not signed in', '未ログイン');
+    sn.className = 'muted';
+  } else {
+    sn.textContent = `${T('이번 세션', 'This session', '今回のセッション')} ${signed(net)}`;
+    sn.className = 'mono ' + (net > 0 ? 'pos' : net < 0 ? 'neg' : 'muted');
+  }
+  document.getElementById('mode').replaceChildren(...[[false, T('연습', 'Practice', '練習')], [true, T('랭크', 'Ranked', 'ランク')]].map(([v, label]) =>
+    h('button', { class: ranked === v ? 'on' : '', disabled: !canSwitchMode(), onclick: () => setRanked(v) }, label)));
   document.getElementById('toast').textContent = toastText || ' ';
-  window.kasino?.setTooltip(`Kasino · ${fmt(S.bankroll)}`);
+  window.kasino?.setTooltip(`Kasino · ${fmt(money())}`);
 }
 
 function render() {
@@ -754,10 +710,12 @@ function render() {
     h('button', { class: prefs.tab === id ? 'on' : '', onclick: () => { prefs.tab = id; savePrefs(); render(); } }, label())));
   const view = document.getElementById('view');
   const scrollTop = view.firstChild?.scrollTop || 0;
+  // 다시 그려도 입력 중인 칸의 포커스와 커서를 유지
   const focused = document.activeElement && document.activeElement.id ? document.activeElement : null;
   const caret = focused && focused.selectionStart;
   const tab = TABS.find(t => t[0] === prefs.tab) || TABS[0];
-  view.replaceChildren(tab[2]());
+  const gameTab = !['stats', 'settings'].includes(tab[0]);
+  view.replaceChildren(ranked && !online.signedIn && gameTab ? rankedGate() : tab[2]());
   if (view.firstChild && scrollTop) view.firstChild.scrollTop = scrollTop;
   if (focused) {
     const again = document.getElementById(focused.id);
@@ -766,5 +724,7 @@ function render() {
 }
 
 applyTheme();
+rankServer = online.profile ? Number(online.profile.balance) : 0;
+if (ranked) bet = Math.max(1, Math.round(rankBalance() / 100));
 render();
 onlineRefresh();

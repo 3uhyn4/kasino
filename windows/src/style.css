@@ -65,11 +65,12 @@ small { font-size: 11px; }
 .spacer { flex: 1; }
 .faded { opacity: 0.3; }
 
-header { display: flex; justify-content: space-between; align-items: flex-end; -webkit-app-region: drag; }
+header { display: flex; justify-content: space-between; align-items: center; -webkit-app-region: drag; }
+header .seg { -webkit-app-region: no-drag; }
 header .right { text-align: right; }
 .bankroll { font-size: 22px; font-weight: 600; }
 #session { font-weight: 500; font-size: 14px; }
-#view { height: 430px; }
+#view { height: 420px; }
 #toast { text-align: center; color: var(--orange); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* 레이아웃 */
@@ -210,32 +211,20 @@ table.stats .l { text-align: left; }
 .section .seg { max-width: 300px; }
 .check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 
-/* 랭크 */
-.seg.mode { align-self: center; width: 180px; }
+/* 모드 · 랭크 */
+.seg.mode { width: 140px; }
 .seg button:disabled { opacity: 0.5; cursor: default; }
-.rankcard { padding: 12px; }
-.badge { width: 72px; height: 72px; border-radius: 50%; border: 3px solid; display: flex; align-items: center; justify-content: center;
-         font-size: 30px; font-weight: 900; flex: none; }
-.grow1 { flex: 1; }
-.tier { font-size: 20px; font-weight: 700; }
-.rating { font-size: 17px; font-weight: 600; margin: 2px 0 6px; }
-.bar { height: 5px; border-radius: 3px; background: var(--btn); overflow: hidden; margin-bottom: 4px; }
-.bar i { display: block; height: 100%; }
-.lastres { height: auto; padding: 8px; display: flex; flex-direction: column; align-items: center; gap: 2px; }
-.delta { font-size: 24px; font-weight: 700; }
-
-/* 온라인 */
 .seg.small { width: 180px; }
+.gate-title { font-size: 17px; font-weight: 700; }
 .authform { display: flex; flex-direction: column; gap: 6px; padding: 10px; }
 .authform input, .settings input { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line);
   border-radius: 6px; padding: 5px 8px; outline: none; }
 .authform input:focus, .settings input:focus { border-color: var(--blue); }
-.mine { padding: 6px 10px; }
+.mine { padding: 8px 10px; }
+.mine .right { text-align: right; }
 .board { overflow: hidden; }
 .lrows { overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 2px; padding-right: 4px; }
 .lrow { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 6px; }
 .lrow.me { background: rgba(37, 99, 235, 0.15); }
 .lrow .rk { width: 26px; text-align: right; font-size: 12px; }
-.lrow .rt { width: 44px; text-align: right; }
-.lrow .nm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 170px; }
-.linkbtn { border: 0; background: none; color: var(--muted); font: inherit; font-size: 11px; text-decoration: underline; cursor: pointer; padding: 0; }
+.lrow .nm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }

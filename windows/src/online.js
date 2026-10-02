@@ -1,5 +1,5 @@
 'use strict';
-// 온라인: 아이디/비밀번호 계정과 전체 순위표 (Supabase, server/schema.sql 참고)
+// 온라인: 랭크 모드 계정(아이디/비밀번호), 칩 잔액, 전체 순위표 (Supabase, server/schema.sql 참고)
 
 const ONLINE = {
   url: 'https://vyjaipiomptfrjxtwnvb.supabase.co',
@@ -17,6 +17,7 @@ const online = {
 };
 
 function onlineErrorText(code) {
+  const rejected = T('이번 판이 서버에 반영되지 않아 잔액을 서버 기준으로 맞췄어요', "This round wasn't accepted, so your chips were synced with the server", '今回の結果は反映されず、残高をサーバーに合わせました');
   return {
     invalid_username: T('아이디는 영문 소문자, 숫자, _ 로 3~16자예요', 'Username: 3–16 lowercase letters, digits or _', 'IDは英小文字・数字・_で3〜16文字です'),
     invalid_nickname: T('닉네임은 2~12자, 한글·영문·숫자·_만 쓸 수 있어요', 'Nickname: 2–12 letters, digits or _', 'ニックネームは2〜12文字です'),
@@ -26,13 +27,16 @@ function onlineErrorText(code) {
     invalid_login: T('아이디 또는 비밀번호가 틀렸어요', 'Wrong username or password', 'IDまたはパスワードが違います'),
     locked: T('비밀번호를 너무 많이 틀렸어요. 10분 뒤에 다시 해 주세요', 'Too many attempts. Try again in 10 minutes', '失敗が多すぎます。10分後にお試しください'),
     session_expired: T('로그인이 만료됐어요. 다시 로그인해 주세요', 'Your session expired. Please sign in again', 'ログインの有効期限が切れました'),
-    too_soon: T('결과를 너무 빨리 보내서 이번 판은 온라인에 반영되지 않았어요', "Sent too quickly, so this match wasn't counted online", '送信が早すぎたため、今回はオンラインに反映されません'),
-    daily_limit: T('오늘 온라인 랭크전 한도(40판)를 채웠어요', "You've hit today's online limit of 40 matches", '本日のオンライン上限（40試合）に達しました'),
+    too_soon: rejected, invalid_round: rejected, insufficient: rejected,
+    relief_unavailable: T('파산 지원은 칩이 100 미만일 때 하루 한 번만 받을 수 있어요', 'Relief is only available once a day when you have under 100 chips', '救済は100チップ未満のとき1日1回だけです'),
     network: T('서버에 연결할 수 없어요', "Can't reach the server", 'サーバーに接続できません'),
   }[code] || `${T('오류가 났어요', 'Something went wrong', 'エラーが発生しました')} (${code})`;
 }
 
+let serverMessage = '';
+
 async function rpc(name, params) {
+  serverMessage = '';
   try {
     const res = await fetch(`${ONLINE.url}/rest/v1/rpc/${name}`, {
       method: 'POST',
@@ -40,7 +44,10 @@ async function rpc(name, params) {
       body: JSON.stringify(params),
       signal: AbortSignal.timeout(15000),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      serverMessage = (await res.json().catch(() => ({}))).message || `HTTP ${res.status}`;
+      return null;
+    }
     return await res.json();
   } catch {
     return null;
@@ -50,9 +57,7 @@ async function rpc(name, params) {
 function setOnlineProfile(p) {
   online.profile = p;
   localStorage.setItem('kasino-profile', JSON.stringify(p));
-  // 로그인 중이면 서버 레이팅이 기준이다
-  Object.assign(S.rank, { rating: p.rating, peak: p.peak, matches: p.matches });
-  save();
+  syncBalance(Number(p.balance));
 }
 
 function clearOnline() {
@@ -60,15 +65,22 @@ function clearOnline() {
   online.profile = null;
   localStorage.removeItem('kasino-session');
   localStorage.removeItem('kasino-profile');
+  queuedNets.clear();
+  openStake = 0;
+  syncBalance(0);
 }
 
-/** 계정 관련 호출. 성공하면 true, 실패하면 online.error에 문구를 넣고 false */
-async function accountCall(name, params) {
-  online.busy = true;
-  render();
+/** 서버 함수 호출. 성공하면 true, 실패하면 online.error에 문구를 넣고 false */
+async function onlineCall(name, params, showBusy = true) {
+  if (showBusy) { online.busy = true; render(); }
   const reply = await rpc(name, params);
-  online.busy = false;
-  if (!reply) { online.error = onlineErrorText('network'); render(); return false; }
+  if (showBusy) online.busy = false;
+  if (!reply) {
+    online.error = serverMessage ? `${T('서버 오류', 'Server error', 'サーバーエラー')}: ${serverMessage}` : onlineErrorText('network');
+    render();
+    return false;
+  }
+  if (reply.profile) setOnlineProfile(reply.profile);
   if (reply.error) {
     if (reply.error === 'session_expired') clearOnline();
     online.error = onlineErrorText(reply.error);
@@ -77,17 +89,16 @@ async function accountCall(name, params) {
   }
   online.error = '';
   if (reply.token) { online.token = reply.token; localStorage.setItem('kasino-session', reply.token); }
-  if (reply.profile) setOnlineProfile(reply.profile);
   render();
   return true;
 }
 
-const onlineSignIn = (u, p) => accountCall('sign_in', { p_username: u, p_password: p });
-const onlineSignUp = (u, p, n) => accountCall('sign_up', { p_username: u, p_password: p, p_nickname: n });
+const onlineSignIn = (u, p) => onlineCall('sign_in', { p_username: u, p_password: p });
+const onlineSignUp = (u, p, n) => onlineCall('sign_up', { p_username: u, p_password: p, p_nickname: n });
 
-/** 앱 시작 시: 저장된 로그인으로 서버의 최신 레이팅을 받아온다 */
+/** 앱 시작 시, 순위 화면을 열 때: 서버의 최신 잔액과 순위를 받아온다 */
 async function onlineRefresh() {
-  if (online.token) await accountCall('me', { p_token: online.token });
+  if (online.token) await onlineCall('me', { p_token: online.token }, false);
 }
 
 async function onlineSignOut() {
@@ -99,18 +110,42 @@ async function onlineSignOut() {
 
 async function onlineDeleteAccount(password) {
   if (!online.token) return false;
-  const ok = await accountCall('delete_account', { p_token: online.token, p_password: password });
+  const ok = await onlineCall('delete_account', { p_token: online.token, p_password: password });
   if (ok) { clearOnline(); render(); }
   return ok;
 }
 
-/** 랭크전 결과를 서버에 반영. 거절되면 서버 값으로 되돌린다 */
-async function onlineSubmit(delta) {
-  if (!online.token) return;
-  if (!(await accountCall('submit_match', { p_token: online.token, p_delta: delta }))) {
-    toast(online.error);
-    await onlineRefresh();
+async function onlineClaimRelief() {
+  if (online.token && await onlineCall('claim_relief', { p_token: online.token })) {
+    toast(T('1,000칩을 받았어요', 'You received 1,000 chips', '1,000チップを受け取りました'));
   }
+}
+
+// 라운드 결과를 순서대로, 서버 제한(0.5초)에 걸리지 않게 보낸다
+let roundQueue = Promise.resolve();
+let lastRoundSent = 0;
+
+/** 한 판 결과를 서버에 보낸다. 거절되면 그 판은 버리고 서버 잔액으로 맞춘다 */
+function onlineSubmitRound(id, game, bet, payout) {
+  const token = online.token;
+  if (!token) { queuedNets.delete(id); return; }
+  roundQueue = roundQueue.then(async () => {
+    const wait = 550 - (Date.now() - lastRoundSent);
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    lastRoundSent = Date.now();
+    const reply = await rpc('submit_round', {
+      p_token: token, p_game: game, p_bet: Math.round(bet * 100) / 100, p_payout: Math.round(payout * 100) / 100,
+    });
+    queuedNets.delete(id);                 // 응답의 잔액에 이 판이 들어 있거나(성공) 버려졌다(실패)
+    if (reply && reply.profile) setOnlineProfile(reply.profile);
+    if (!reply || reply.error) {
+      if (reply && reply.error === 'session_expired') clearOnline();
+      online.error = reply ? onlineErrorText(reply.error) : onlineErrorText('network');
+      toast(online.error);
+      if (!reply) await onlineRefresh();
+    }
+    render();
+  });
 }
 
 async function onlineLoadLeaderboard() {

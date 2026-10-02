@@ -1,5 +1,6 @@
--- Kasino 계정 · 랭크 순위표
+-- Kasino 계정 · 랭크 순위표 (v2: 칩 잔액 순위)
 -- Supabase 대시보드 > SQL Editor에 전체를 붙여넣고 Run.
+-- 이전 버전 테이블과 함수는 지우고 새로 만든다.
 --
 -- 아이디/비밀번호 로그인을 Supabase Auth 대신 여기서 직접 처리한다(이메일 불필요).
 --  - 비밀번호는 bcrypt 해시로만 저장
@@ -7,8 +8,18 @@
 --  - 비밀번호를 10번 틀리면 10분 잠금
 -- 테이블은 직접 읽거나 쓸 수 없고, 아래 함수(RPC)로만 접근한다.
 --
--- 레이팅은 서버가 보관한다. 앱은 랭크전이 끝날 때 변화량만 보내고,
--- 서버는 한 판에 ±60점, 30초에 한 번, 하루 40판까지만 반영한다(간단한 조작 방지).
+-- 랭크 모드: 가입하면 1,000칩. 앱은 매 판 (게임, 건 금액, 받은 금액)을 보내고
+-- 서버가 잔액을 관리한다. 건 금액은 잔액 이하, 받은 금액은 게임별 최대 배당 이하,
+-- 0.5초에 한 판까지만 받는다. 잔액이 100 미만이면 하루 한 번 1,000칩으로 채울 수 있다.
+
+-- ---------- 이전 버전 정리
+
+drop function if exists
+  public.sign_up(text, text, text), public.sign_in(text, text), public.sign_out(text), public.me(text),
+  public.submit_match(text, int), public.submit_round(text, text, numeric, numeric), public.claim_relief(text),
+  public.set_nickname(text, text), public.delete_account(text, text), public.leaderboard(int),
+  public._session_player(text), public._new_session(uuid), public._profile(uuid);
+drop table if exists public.sessions, public.players;
 
 create extension if not exists pgcrypto with schema extensions;
 
@@ -17,14 +28,13 @@ create table public.players (
   username       text not null unique check (username ~ '^[a-z0-9_]{3,16}$'),
   nickname       text not null unique
                  check (char_length(nickname) between 2 and 12
-                        and nickname ~ '^[0-9A-Za-z_가-힣ぁ-ゟ゠-ヿ一-鿿]+$'),
+                        and nickname ~ '^[0-9A-Za-z_\uAC00-\uD7A3\u3041-\u309F\u30A0-\u30FF\u4E00-\u9FFF]+$'),
   pass_hash      text not null,
-  rating         int not null default 1000,
-  peak           int not null default 1000,
-  matches        int not null default 0,
-  last_match_at  timestamptz,
-  day            date,
-  day_matches    int not null default 0,
+  balance        numeric(20, 2) not null default 1000 check (balance >= 0),
+  peak           numeric(20, 2) not null default 1000,
+  rounds         int not null default 0,
+  last_round_at  timestamptz,
+  relief_day     date,
   failed_logins  int not null default 0,
   locked_until   timestamptz,
   created_at     timestamptz not null default now()
@@ -72,12 +82,11 @@ as $$
   select json_build_object(
     'username', p.username,
     'nickname', p.nickname,
-    'rating',   p.rating,
+    'balance',  p.balance,
     'peak',     p.peak,
-    'matches',  p.matches,
-    'rank',     case when p.matches > 0
-                     then (select count(*) + 1 from public.players q where q.matches > 0 and q.rating > p.rating)
-                end)
+    'rounds',   p.rounds,
+    'rank',     (select count(*) + 1 from public.players q where q.balance > p.balance),
+    'relief',   p.balance < 100 and (p.relief_day is null or p.relief_day < current_date))
   from public.players p where p.id = p_player;
 $$;
 
@@ -96,7 +105,7 @@ declare
   pid uuid;
 begin
   if u !~ '^[a-z0-9_]{3,16}$' then return json_build_object('error', 'invalid_username'); end if;
-  if char_length(n) not between 2 and 12 or n !~ '^[0-9A-Za-z_가-힣ぁ-ゟ゠-ヿ一-鿿]+$' then
+  if char_length(n) not between 2 and 12 or n !~ '^[0-9A-Za-z_\uAC00-\uD7A3\u3041-\u309F\u30A0-\u30FF\u4E00-\u9FFF]+$' then
     return json_build_object('error', 'invalid_nickname');
   end if;
   if char_length(p_password) not between 6 and 72 then return json_build_object('error', 'invalid_password'); end if;
@@ -154,31 +163,56 @@ begin
 end;
 $$;
 
-create function public.submit_match(p_token text, p_delta int)
+-- 한 판 결과 반영. 받을 수 있는 최대 배당(원금 포함 배수)은 게임마다 다르다.
+create function public.submit_round(p_token text, p_game text, p_bet numeric, p_payout numeric)
 returns json
 language plpgsql security definer set search_path = ''
 as $$
 declare
   pid uuid := public._session_player(p_token);
   p public.players;
-  d int := greatest(-60, least(60, coalesce(p_delta, 0)));
+  cap numeric := case p_game
+                   when 'baccarat'    then 32    -- 사이드 베팅 포함
+                   when 'dragonTiger' then 9
+                   when 'roulette'    then 36
+                   when 'slots'       then 777
+                   when 'holdem'      then 4     -- 내 몫의 팟은 최대 4명분
+                 end;
 begin
   if pid is null then return json_build_object('error', 'session_expired'); end if;
+  if cap is null or p_bet is null or p_payout is null or p_bet <= 0 or p_payout < 0 or p_payout > p_bet * cap then
+    return json_build_object('error', 'invalid_round');
+  end if;
   select * into p from public.players where id = pid for update;
-  if p.last_match_at is not null and p.last_match_at > now() - interval '30 seconds' then
+  if p.last_round_at is not null and p.last_round_at > now() - interval '500 milliseconds' then
     return json_build_object('error', 'too_soon');
   end if;
-  if p.day = current_date and p.day_matches >= 40 then
-    return json_build_object('error', 'daily_limit');
+  if p_bet > p.balance then
+    return json_build_object('error', 'insufficient', 'profile', public._profile(pid));
   end if;
   update public.players
-     set rating        = greatest(0, rating + d),
-         peak          = greatest(peak, rating + d),
-         matches       = matches + 1,
-         last_match_at = now(),
-         day_matches   = case when day = current_date then day_matches + 1 else 1 end,
-         day           = current_date
+     set balance       = round(balance - p_bet + p_payout, 2),
+         peak          = greatest(peak, round(balance - p_bet + p_payout, 2)),
+         rounds        = rounds + 1,
+         last_round_at = now()
    where id = pid;
+  return json_build_object('profile', public._profile(pid));
+end;
+$$;
+
+-- 파산 지원: 잔액 100 미만이면 하루 한 번 1,000칩
+create function public.claim_relief(p_token text)
+returns json
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  pid uuid := public._session_player(p_token);
+begin
+  if pid is null then return json_build_object('error', 'session_expired'); end if;
+  update public.players
+     set balance = 1000, relief_day = current_date
+   where id = pid and balance < 100 and (relief_day is null or relief_day < current_date);
+  if not found then return json_build_object('error', 'relief_unavailable'); end if;
   return json_build_object('profile', public._profile(pid));
 end;
 $$;
@@ -192,7 +226,7 @@ declare
   n text := trim(p_nickname);
 begin
   if pid is null then return json_build_object('error', 'session_expired'); end if;
-  if char_length(n) not between 2 and 12 or n !~ '^[0-9A-Za-z_가-힣ぁ-ゟ゠-ヿ一-鿿]+$' then
+  if char_length(n) not between 2 and 12 or n !~ '^[0-9A-Za-z_\uAC00-\uD7A3\u3041-\u309F\u30A0-\u30FF\u4E00-\u9FFF]+$' then
     return json_build_object('error', 'invalid_nickname');
   end if;
   if exists (select 1 from public.players where nickname = n and id <> pid) then
@@ -223,24 +257,38 @@ create function public.leaderboard(p_limit int default 50)
 returns json
 language sql stable security definer set search_path = ''
 as $$
-  select coalesce(json_agg(x order by x.rank, x.matches desc), '[]'::json)
+  select coalesce(json_agg(x order by x.rank, x.rounds desc), '[]'::json)
   from (
-    select nickname, rating, peak, matches,
-           rank() over (order by rating desc) as rank
+    select nickname, balance, rounds,
+           rank() over (order by balance desc) as rank
     from public.players
-    where matches > 0
-    order by rating desc, matches desc
+    order by balance desc, rounds desc
     limit least(greatest(coalesce(p_limit, 50), 1), 100)
   ) x;
 $$;
 
 revoke execute on function
   public.sign_up(text, text, text), public.sign_in(text, text), public.sign_out(text), public.me(text),
-  public.submit_match(text, int), public.set_nickname(text, text), public.delete_account(text, text),
-  public.leaderboard(int)
+  public.submit_round(text, text, numeric, numeric), public.claim_relief(text),
+  public.set_nickname(text, text), public.delete_account(text, text), public.leaderboard(int)
   from public;
 grant execute on function
   public.sign_up(text, text, text), public.sign_in(text, text), public.sign_out(text), public.me(text),
-  public.submit_match(text, int), public.set_nickname(text, text), public.delete_account(text, text),
-  public.leaderboard(int)
+  public.submit_round(text, text, numeric, numeric), public.claim_relief(text),
+  public.set_nickname(text, text), public.delete_account(text, text), public.leaderboard(int)
   to anon, authenticated;
+
+-- ---------- 자체 점검: 가입이 실제로 되는지 확인하고 지운다.
+-- 문제가 있으면 여기서 오류 메시지가 나오고, 위 내용도 모두 취소된다.
+do $$
+declare
+  -- 닉네임은 한글(U+C790 U+CCB4 U+C810 U+AC80)로 넣어 한글 처리도 함께 확인한다
+  r json := public.sign_up('selftest_kasino', 'selftest-pass', U&'\C790\CCB4\C810\AC80');
+begin
+  if r->>'token' is null then
+    raise exception 'Kasino self-test failed: %', r;
+  end if;
+  delete from public.players where username = 'selftest_kasino';
+  raise notice 'Kasino self-test passed';
+end;
+$$;
